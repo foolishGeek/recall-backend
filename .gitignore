@@ -1,0 +1,21 @@
+# Supabase local
+.branches
+.temp
+supabase/.branches
+supabase/.temp
+
+# Local env / secrets
+.env
+.env.*
+*.env
+**/secrets/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Deno / Edge Functions local cache (when functions exist)
+**/.deno/
