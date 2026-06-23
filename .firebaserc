@@ -1,0 +1,7 @@
+{
+  "projects": {
+    "default": "recall-spaced-staging",
+    "staging": "recall-spaced-staging",
+    "prod": "recall-spaced-prod"
+  }
+}
