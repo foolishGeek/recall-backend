@@ -74,7 +74,7 @@ Set via dashboard or `./scripts/set-ef-secrets.sh` (linked project + filled `.en
 |--------|---------|------|-------|
 | `GEMINI_API_KEY` | [x] | [x] | Free tier AI |
 | `ANTHROPIC_API_KEY` | [x] | [x] | Premium tier AI |
-| `OPENAI_API_KEY` | skip | skip | Deferred — no embeddings v1 |
+| `OPENAI_API_KEY` | skip | skip | Not required for S00; resolve before S06 if OpenAI embeddings/fallback remain the chosen implementation |
 | `REVENUECAT_REST_API_KEY` | [x] | [ ] | `[D-EF-7]` — `sk_` secret key |
 | `REVENUECAT_WEBHOOK_SECRET` | [x] | [ ] | From RC webhook |
 | `FCM_SERVICE_ACCOUNT_JSON` | [x] | [ ] | Firebase Admin SDK JSON |
@@ -120,7 +120,7 @@ Full checklist: [`PROD-DEPLOYMENT-DEFERRED.md`](PROD-DEPLOYMENT-DEFERRED.md). No
 
 - [ ] Sentry prod DSN
 - [ ] Prod Google OAuth (Web + Android `app.recall`)
-- [ ] Prod RC webhook + REST secrets + public SDK keys on Supabase
+- [ ] Prod RC webhook + REST secret on Supabase; prod public SDK keys for Flutter dart-defines
 - [ ] Prod `FCM_SERVICE_ACCOUNT_JSON`
 - [ ] Migrations staging → prod
 - [ ] Apple + APNs (if enrolled); release SHA-1; Firebase cleanup
