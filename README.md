@@ -2,20 +2,40 @@
 
 Supabase backend for **Recall**.
 
-## Setup (Prompt 2)
+## S00 — Infra (current)
 
-- Supabase CLI linked to `recall-staging` and `recall-prod`
+| Doc | Purpose |
+|-----|---------|
+| [`docs/PREFLIGHT-CHECKLIST.md`](docs/PREFLIGHT-CHECKLIST.md) | Sprint DoD tracker |
+| [`docs/SETUP-RUNBOOK.md`](docs/SETUP-RUNBOOK.md) | Portal steps (Supabase, OAuth, RC, Sentry) |
+| [`docs/DART-DEFINES.md`](docs/DART-DEFINES.md) | Flutter `--dart-define` keys per flavor |
+| [`docs/MIGRATION-WORKFLOW.md`](docs/MIGRATION-WORKFLOW.md) | staging → smoke → prod |
+
+**CLI:** use `npx supabase@latest` (Homebrew install may require newer Xcode).
+
+```bash
+npx supabase login
+./scripts/provision-supabase.sh
+```
+
+Local secrets vault: `secrets/` (gitignored). Firebase GCP IDs: `recall-spaced-staging`, `recall-spaced-prod`.
+
+## Setup (S01+)
+
+- Supabase CLI linked to `recall-staging` (daily) and `recall-prod` (releases)
 - Migrations applied staging first, then prod
 
 ## Structure
 
 ```
 supabase/
-  migrations/     # Postgres schema, RLS, views
-  functions/      # Edge Functions (ai-forge, compute-due, …)
+  migrations/     # Postgres schema, RLS, views (S01+)
+  functions/      # Edge Functions (S06+)
+scripts/          # S00 provisioning helpers
+docs/             # Checklists and runbooks
 ```
 
-Canonical schema: [`../Roadmap/02-data-layer.md`](../Roadmap/02-data-layer.md)
+Canonical schema: [`S01`](../Roadmap/sprints/S01-schema-migrations.md) · API contracts: per-feature sprints · [`COVERAGE-LEDGER.md`](../Roadmap/sprints/COVERAGE-LEDGER.md)
 
 ## Latency
 
@@ -28,5 +48,5 @@ Separate repository. Commit meaningful chunks after user approval. Do not push u
 
 ## Docs
 
-- [Engine spec](../Roadmap/00-engine-design.md)
-- [PRD traceability](../Roadmap/PRD-traceability.md)
+- [Engine spec](../Roadmap/sprints/S04-engine.md)
+- [Canon decisions](../Roadmap/sprints/CANON-DECISIONS.md) · [Coverage ledger](../Roadmap/sprints/COVERAGE-LEDGER.md)
