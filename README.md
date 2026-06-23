@@ -10,6 +10,7 @@ Supabase backend for **Recall**.
 | [`docs/SETUP-RUNBOOK.md`](docs/SETUP-RUNBOOK.md) | Portal steps (Supabase, OAuth, RC, Sentry) |
 | [`docs/DART-DEFINES.md`](docs/DART-DEFINES.md) | Flutter `--dart-define` keys per flavor |
 | [`docs/MIGRATION-WORKFLOW.md`](docs/MIGRATION-WORKFLOW.md) | staging → smoke → prod |
+| [`docs/PROD-DEPLOYMENT-DEFERRED.md`](docs/PROD-DEPLOYMENT-DEFERRED.md) | Prod mirror checklist (S27) |
 
 **CLI:** use `npx supabase@latest` (Homebrew install may require newer Xcode).
 

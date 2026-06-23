@@ -71,7 +71,7 @@ Per Firebase project (`recall-spaced-staging`, `recall-spaced-prod`):
 5. **Offerings** → `default` → attach monthly + yearly packages.
 6. **Integrations** → Webhooks → URL:
 
-   `https://<staging-ref>.supabase.co/functions/v1/revenuecat-webhook`
+   `https://vxbqzzebiuxzywmekdex.supabase.co/functions/v1/revenuecat-webhook`
 
    Copy authorization secret → `REVENUECAT_WEBHOOK_SECRET`.
 7. **API keys** → REST API key → `REVENUECAT_REST_API_KEY`; Public SDK key → dart-define `REVENUECAT_API_KEY`.

@@ -20,22 +20,28 @@ Canon: [`CANON-DECISIONS.md`](../../Roadmap/sprints/CANON-DECISIONS.md) §Enviro
 
 ## Staging example
 
+**Project ref:** `vxbqzzebiuxzywmekdex`  
+**Publishable key:** stored in `secrets/LOCAL-SECRETS.md` (maps to `SUPABASE_ANON_KEY` dart-define).
+
 ```bash
 flutter run \
   --dart-define=ENV=staging \
-  --dart-define=SUPABASE_URL=https://<staging-ref>.supabase.co \
-  --dart-define=SUPABASE_ANON_KEY=<staging-anon-key> \
-  --dart-define=SENTRY_DSN=<staging-sentry-dsn> \
+  --dart-define=SUPABASE_URL=https://vxbqzzebiuxzywmekdex.supabase.co \
+  --dart-define=SUPABASE_ANON_KEY=<from secrets/LOCAL-SECRETS.md> \
+  --dart-define=SENTRY_DSN=https://7ebc34d33823d5e5f6f34f5f795331d2@o4511616964558848.ingest.us.sentry.io/4511616969998336 \
   --dart-define=REVENUECAT_API_KEY=<rc-staging-sdk-key>
 ```
 
 ## Production example
 
+**Project ref:** `cpyhkjourabizancgkjm`  
+**Publishable key:** stored in `secrets/LOCAL-SECRETS.md`.
+
 ```bash
 flutter run \
   --dart-define=ENV=prod \
-  --dart-define=SUPABASE_URL=https://<prod-ref>.supabase.co \
-  --dart-define=SUPABASE_ANON_KEY=<prod-anon-key> \
+  --dart-define=SUPABASE_URL=https://cpyhkjourabizancgkjm.supabase.co \
+  --dart-define=SUPABASE_ANON_KEY=<from secrets/LOCAL-SECRETS.md> \
   --dart-define=SENTRY_DSN=<prod-sentry-dsn> \
   --dart-define=REVENUECAT_API_KEY=<rc-prod-sdk-key>
 ```

@@ -22,10 +22,24 @@ See [`secrets/IDENTIFIERS.md`](../secrets/IDENTIFIERS.md) (local, gitignored) fo
 
 ## Supabase projects
 
-- [ ] Create `recall-staging` at [dashboard.supabase.com](https://supabase.com/dashboard)
-- [ ] Create `recall-prod` (same region as staging)
+| | Staging | Production |
+|--|---------|------------|
+| Name | `recall-staging` | `recall-prod` |
+| Project ref | `vxbqzzebiuxzywmekdex` | `cpyhkjourabizancgkjm` |
+| URL | `https://vxbqzzebiuxzywmekdex.supabase.co` | `https://cpyhkjourabizancgkjm.supabase.co` |
+| Region | `ap-southeast-1` | `ap-northeast-2` |
+| Publishable key | in `LOCAL-SECRETS.md` | in `LOCAL-SECRETS.md` |
+
+- [x] Create `recall-staging` — ref `vxbqzzebiuxzywmekdex` (region `ap-southeast-1`)
+- [x] Create `recall-prod` — ref `cpyhkjourabizancgkjm` (region `ap-northeast-2`)
 - [x] `recall-backend/`: `supabase init` completed
-- [ ] `supabase link --project-ref <staging-ref>` — **requires `npx supabase login`**
+- [x] Staging API keys verified (publishable + secret → local vault)
+- [x] `supabase link --project-ref vxbqzzebiuxzywmekdex` (staging — default CLI target)
+- [x] `supabase link --project-ref cpyhkjourabizancgkjm` (prod)
+- [x] Extensions enabled on prod
+- [x] `CRON_SECRET` set on prod
+- [x] Extensions enabled: `pg_cron`, `pg_net`, `vector`, `pgcrypto`
+- [x] `CRON_SECRET` set on staging
 - [x] Migration workflow documented → [`MIGRATION-WORKFLOW.md`](MIGRATION-WORKFLOW.md)
 
 **Helper:** `./scripts/provision-supabase.sh` after CLI login.
@@ -36,13 +50,13 @@ See [`secrets/IDENTIFIERS.md`](../secrets/IDENTIFIERS.md) (local, gitignored) fo
 
 | Item | Staging | Prod |
 |------|---------|------|
-| Email OTP | [ ] | [ ] |
-| Google | [ ] | [ ] |
+| Email OTP | [x] | [x] |
+| Google | [x] Web in Supabase + Android client in GCP (`app.recall.staging`) | [ ] Web + Android (`app.recall`) |
 | Apple | BLOCKED — no Apple Developer | BLOCKED |
-| Site URL | `app.recall.staging://login-callback` | `app.recall://login-callback` |
-| Redirect URLs | scheme + `http://localhost:**` | scheme only |
+| Site URL | [x] `app.recall.staging://login-callback` | [x] `app.recall://login-callback` |
+| Redirect URLs | [x] scheme + `http://localhost:**` | [x] scheme only |
 
-**Google OAuth:** Google Cloud Console → OAuth consent + Web client → paste into Supabase Auth → Google. Android clients need package + debug SHA-1:
+**Google OAuth:** Web client in Supabase Auth. **Android** OAuth client in GCP: package `app.recall.staging`, debug SHA-1 below. **iOS** OAuth client deferred (revisit before iOS testing / S08 on device).
 
 ```
 86:78:B0:8D:02:05:56:79:CC:5B:AE:67:C4:E2:35:4D:9B:07:EE:B9
@@ -58,13 +72,13 @@ Set via dashboard or `./scripts/set-ef-secrets.sh` (linked project + filled `.en
 
 | Secret | Staging | Prod | Notes |
 |--------|---------|------|-------|
-| `GEMINI_API_KEY` | [ ] | [ ] | User-supplied |
-| `ANTHROPIC_API_KEY` | [ ] | [ ] | User-supplied |
-| `OPENAI_API_KEY` | [ ] | [ ] | User-supplied |
-| `REVENUECAT_WEBHOOK_SECRET` | [ ] | [ ] | From RC webhook |
-| `REVENUECAT_REST_API_KEY` | [ ] | [ ] | `[D-EF-7]` |
-| `FCM_SERVICE_ACCOUNT_JSON` | [ ] | [ ] | Firebase service account |
-| `CRON_SECRET` | [x] generated | [x] generated | `secrets/cron-*.txt` |
+| `GEMINI_API_KEY` | [x] | [x] | Free tier AI |
+| `ANTHROPIC_API_KEY` | [x] | [x] | Premium tier AI |
+| `OPENAI_API_KEY` | skip | skip | Deferred — no embeddings v1 |
+| `REVENUECAT_REST_API_KEY` | [x] | [ ] | `[D-EF-7]` — `sk_` secret key |
+| `REVENUECAT_WEBHOOK_SECRET` | [x] | [ ] | From RC webhook |
+| `FCM_SERVICE_ACCOUNT_JSON` | [x] | [ ] | Firebase Admin SDK JSON |
+| `CRON_SECRET` | [x] | [x] | `secrets/cron-*.txt` |
 | `SUPABASE_SERVICE_ROLE_KEY` | auto | auto | Do not set manually |
 
 ---
@@ -78,7 +92,7 @@ Set via dashboard or `./scripts/set-ef-secrets.sh` (linked project + filled `.en
 | iOS app registered | [x] bundle `app.recall.staging` | [x] bundle `app.recall` |
 | Debug SHA-1 on Android app | [x] | [x] |
 | `google-services.json` | [x] `secrets/firebase/` | [x] `secrets/firebase/` |
-| FCM service account → secret | [ ] | [ ] | IAM → Firebase Admin SDK |
+| FCM service account → secret | [x] | [ ] | IAM → Firebase Admin SDK |
 | APNs key in Firebase | BLOCKED | BLOCKED | Apple Developer required |
 
 **Cleanup:** `recall-spaced-staging` has duplicate prod bundle apps from an MCP mis-route — safe to delete `Recall Prod Android` / `Recall Prod iOS` there; canonical prod apps live in `recall-spaced-prod`.
@@ -89,14 +103,27 @@ Set via dashboard or `./scripts/set-ef-secrets.sh` (linked project + filled `.en
 
 ## Extensions / cron
 
-Run [`scripts/sql/enable-extensions.sql`](../scripts/sql/enable-extensions.sql) in SQL Editor **per project**:
+Extensions enabled on **staging and prod** via [`scripts/sql/enable-extensions.sql`](../scripts/sql/enable-extensions.sql):
 
-- [ ] `pg_cron`
-- [ ] `pg_net` — if unavailable, note fallback: Supabase scheduled Edge Function for `compute-due` (S16)
-- [ ] `vector`
-- [ ] `pgcrypto`
+- [x] `pg_cron` (staging + prod)
+- [x] `pg_net` (staging + prod)
+- [x] `vector` (staging + prod)
+- [x] `pgcrypto` (staging + prod)
 
 Do **not** schedule cron jobs in S00 (S16).
+
+---
+
+## Prod deployment (deferred → S27)
+
+Full checklist: [`PROD-DEPLOYMENT-DEFERRED.md`](PROD-DEPLOYMENT-DEFERRED.md). Not blocking S01–S26 on staging.
+
+- [ ] Sentry prod DSN
+- [ ] Prod Google OAuth (Web + Android `app.recall`)
+- [ ] Prod RC webhook + REST secrets + public SDK keys on Supabase
+- [ ] Prod `FCM_SERVICE_ACCOUNT_JSON`
+- [ ] Migrations staging → prod
+- [ ] Apple + APNs (if enrolled); release SHA-1; Firebase cleanup
 
 ---
 
@@ -106,16 +133,18 @@ Per `[D-PAY-1]`:
 
 | Item | Status |
 |------|--------|
-| Staging app | [ ] |
-| Entitlement `premium` | [ ] |
-| Offering `default` | [ ] |
-| Product `recall_premium_monthly` | [ ] |
-| Product `recall_premium_yearly` | [ ] |
-| Product `ai_credits_100` | [ ] |
-| Product `ai_credits_500` | [ ] |
-| Webhook URL reserved | [ ] `https://<staging-ref>.supabase.co/functions/v1/revenuecat-webhook` |
+| Staging app | [x] Recall-Stage (Play Store) |
+| Entitlement `premium` | [x] verify in RC |
+| Offering `default` | [x] verify in RC |
+| Product `recall_premium_monthly` | [x] |
+| Product `recall_premium_yearly` | [x] |
+| Product `ai_credits_100` | [x] |
+| Product `ai_credits_500` | [x] |
+| Webhook URL reserved | [x] `https://vxbqzzebiuxzywmekdex.supabase.co/functions/v1/revenuecat-webhook` |
 
 Prod RC app: optional in S00; dart-defines doc includes prod key slot.
+
+**Staging public SDK key** (`goog_...`) captured in `secrets/LOCAL-SECRETS.md` for `REVENUECAT_API_KEY` dart-define.
 
 ---
 
@@ -123,9 +152,9 @@ Prod RC app: optional in S00; dart-defines doc includes prod key slot.
 
 | Item | Status |
 |------|--------|
-| Project `recall-staging` (Flutter) | [ ] |
-| Project `recall-prod` (Flutter) | [ ] |
-| DSNs captured locally | [ ] → `secrets/LOCAL-SECRETS.template.md` |
+| Project `recall-staging` (Flutter) | [x] |
+| Project `recall-prod` (Flutter) | [ ] deferred |
+| DSNs captured locally | staging [x] prod [ ] |
 
 Init in app: S02.
 
@@ -139,14 +168,12 @@ Documented in [`DART-DEFINES.md`](DART-DEFINES.md). Consumed from S02.
 
 ## Definition of Done (S00)
 
-- [ ] Staging project reachable; CLI linked
-- [ ] Auth providers + redirect URLs configured
-- [ ] All secrets set (incl. `REVENUECAT_REST_API_KEY`); extensions enabled
-- [ ] RevenueCat staging app + 4 products + webhook URL reserved
-- [ ] Sentry staging + prod DSNs captured
+- [x] Staging project reachable; CLI linked
+- [x] Auth providers + redirect URLs configured (staging; Apple BLOCKED; iOS Google deferred)
+- [x] Staging EF secrets set; extensions enabled on staging
+- [x] RevenueCat staging app + 4 products + webhook URL reserved
+- [x] Sentry staging DSN captured; prod DSN deferred → S27
 - [x] Pre-flight checklist committed to `recall-backend`
 - [x] No schema migrations, Edge Functions, or Flutter code in this sprint
 
-**Automated in S00:** Firebase projects/apps, `supabase init`, scripts, CRON secrets generated, Android `google-services.json` in local vault.
-
-**Requires your action:** Supabase login + project create, Sentry/RevenueCat portals, AI API keys, FCM service account JSON, Google OAuth Web client → Supabase, extension SQL on remote DBs.
+**S00 closed:** staging bootstrap complete. Prod mirror → [`PROD-DEPLOYMENT-DEFERRED.md`](PROD-DEPLOYMENT-DEFERRED.md) (S27).
