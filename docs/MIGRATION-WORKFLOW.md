@@ -60,6 +60,28 @@ npx supabase link --project-ref <staging-ref>
 
 ---
 
+## Embed trigger database settings (required for `[D-EF-4]`)
+
+The S01 `on_node_content_hash_change` trigger POSTs to the `ai-forge` `embed` function via `pg_net`.
+It reads two database-level GUCs and **silently no-ops** (returns the row unchanged, no POST) when
+either is unset — so on a fresh project the trigger does nothing until these are configured. Set them
+once per project (run as the owner; substitute the project's real values):
+
+```sql
+ALTER DATABASE postgres SET app.supabase_url = 'https://<project-ref>.supabase.co';
+ALTER DATABASE postgres SET app.service_role_key = '<service-role-jwt>';
+-- new sessions pick these up; reconnect (or SELECT pg_reload_conf()) to apply
+```
+
+- The `embed` call only fires once `ai-forge` is deployed (S06). Until then, leaving these unset (or
+  set) is harmless — the trigger degrades gracefully and re-fires on the next `content_hash` change.
+- **Security:** `app.service_role_key` lives in the DB config and is readable by superusers / roles
+  with config access. Treat it as a secret: never commit it, never echo it into migration files,
+  and rotate it if exposed. The trigger function is `SECURITY DEFINER` and reads the key only at
+  send time.
+
+---
+
 ## Local development (optional)
 
 ```bash
