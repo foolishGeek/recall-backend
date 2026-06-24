@@ -371,6 +371,22 @@ authorization_url_path = "/oauth/consent"
 # Allow dynamic client registration
 allow_dynamic_registration = false
 
+# --- Edge Function settings (S06 AI Forge) ---
+# ai-forge accepts both user JWTs and the service-role key (embed DB trigger);
+# the gateway verifies either, then the function resolves the caller.
+[functions.ai-forge]
+verify_jwt = true
+
+[functions.link-preview]
+verify_jwt = true
+
+[functions.extract-pdf-text]
+verify_jwt = true
+
+# RevenueCat posts with its own signature, not a Supabase JWT.
+[functions.revenuecat-webhook]
+verify_jwt = false
+
 [edge_runtime]
 enabled = true
 # Supported request policies: `oneshot`, `per_worker`.

@@ -74,7 +74,7 @@ Set via dashboard or `./scripts/set-ef-secrets.sh` (linked project + filled `.en
 |--------|---------|------|-------|
 | `GEMINI_API_KEY` | [x] | [x] | Free tier AI |
 | `ANTHROPIC_API_KEY` | [x] | [x] | Premium tier AI |
-| `OPENAI_API_KEY` | skip | skip | Not required for S00; resolve before S06 if OpenAI embeddings/fallback remain the chosen implementation |
+| `OPENAI_API_KEY` | [x] | [x] | Embeddings (`text-embedding-3-small`) + GPT-4o-mini fallback |
 | `REVENUECAT_REST_API_KEY` | [x] | [ ] | `[D-EF-7]` — `sk_` secret key |
 | `REVENUECAT_WEBHOOK_SECRET` | [x] | [ ] | From RC webhook |
 | `FCM_SERVICE_ACCOUNT_JSON` | [x] | [ ] | Firebase Admin SDK JSON |
