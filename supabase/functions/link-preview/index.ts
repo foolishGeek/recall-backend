@@ -14,6 +14,8 @@ interface Preview {
   site_name: string | null;
   duration_sec: number | null;
   video_id: string | null;
+  read_time_sec: number | null;
+  view_count: number | null;
 }
 
 const TIMEOUT_MS = 5000;
@@ -28,6 +30,8 @@ function minimal(url: string): Preview {
     site_name: null,
     duration_sec: null,
     video_id: null,
+    read_time_sec: null,
+    view_count: null,
   };
 }
 
@@ -128,6 +132,8 @@ async function buildPreview(rawUrl: string): Promise<Preview> {
       site_name: metaTag(html, ["og:site_name"]),
       duration_sec: null,
       video_id: null,
+      read_time_sec: null,
+      view_count: null,
     };
 
     const vid = youtubeVideoId(finalUrl);
@@ -135,6 +141,15 @@ async function buildPreview(rawUrl: string): Promise<Preview> {
       preview.video_id = vid;
       const len = html.match(/"lengthSeconds":"(\d+)"/);
       if (len) preview.duration_sec = Number(len[1]);
+      const vc = html.match(/"viewCount":"(\d+)"/);
+      if (vc) preview.view_count = Number(vc[1]);
+    } else {
+      // Estimate read time: strip HTML tags, count words, assume 238 wpm
+      const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+      const wordCount = text.split(" ").filter((w) => w.length > 0).length;
+      if (wordCount > 100) {
+        preview.read_time_sec = Math.round((wordCount / 238) * 60);
+      }
     }
 
     return preview;
