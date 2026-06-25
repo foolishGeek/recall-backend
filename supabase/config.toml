@@ -396,6 +396,11 @@ verify_jwt = true
 [functions.revenuecat-webhook]
 verify_jwt = false
 
+# compute-due is invoked by pg_cron (no user JWT); it authenticates with the
+# X-Cron-Secret header inside the handler.
+[functions.compute-due]
+verify_jwt = false
+
 [edge_runtime]
 enabled = true
 # Supported request policies: `oneshot`, `per_worker`.
