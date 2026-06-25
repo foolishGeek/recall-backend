@@ -386,6 +386,15 @@ allow_dynamic_registration = false
 [functions.ai-forge]
 verify_jwt = true
 
+[functions.quiz-generate]
+verify_jwt = true
+
+[functions.quiz-submit-answer]
+verify_jwt = true
+
+[functions.quiz-attempt]
+verify_jwt = true
+
 [functions.link-preview]
 verify_jwt = true
 
