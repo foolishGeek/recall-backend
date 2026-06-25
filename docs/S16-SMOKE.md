@@ -2,9 +2,24 @@
 
 **Sprint:** S16 Recall Drop notifications
 **Environment:** `recall-staging` (`vxbqzzebiuxzywmekdex`)
-**Status:** Code complete; staging deploy + smoke **pending** (Supabase MCP not
-authenticated and CLI not installed in this environment — needs a Supabase access
-token / `supabase login` to apply).
+**Date:** 2026-06-26
+**Status:** Backend deployed & smoke-verified on staging. On-device QA (real push
+→ delivered/opened + deep-link) pending a device build.
+
+## Results
+
+| Check | Result |
+| --- | --- |
+| `00014_compute_due_rpc` applied | yes |
+| Vault `app_cron_secret` created (matches EF `CRON_SECRET`) | yes |
+| `00015_compute_due_cron` applied | yes |
+| `cron.job` `compute-due-15min` `*/15 * * * *` | active |
+| `compute-due` EF deployed (`verify_jwt=false`) | ACTIVE v1 |
+| POST no `X-Cron-Secret` | 401 |
+| POST wrong secret | 401 |
+| POST correct secret | 200 `{"users_evaluated":0,"notifications_sent":0}` |
+| `select * from compute_due_candidates()` | runs clean; 0 rows (lone opted-in user under due-threshold) |
+| On-device: receipt → `delivered`, tap → `opened` + lands on /today | PENDING device QA |
 
 ## Migrations to apply (staging)
 
