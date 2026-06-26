@@ -18,14 +18,24 @@ export async function gateCheck(userId: string): Promise<GateDecision> {
   return data as GateDecision;
 }
 
+/**
+ * Credit intent for the premium fair-use cooldown path:
+ * - "auto"  -> deduct a credit if available, else 429 ai_cooldown (default).
+ * - "ask"   -> never spend; always 429 ai_cooldown so the UI can ask first.
+ * - "spend" -> explicit spend; deduct, or 403 insufficient_credits at balance 0.
+ */
+export type CreditIntent = "auto" | "ask" | "spend";
+
 /** Full §3b gate; mutates counters/credits atomically on allow. */
 export async function gateConsume(
   userId: string,
   feature: string,
+  intent: CreditIntent = "auto",
 ): Promise<GateDecision> {
   const { data, error } = await adminClient().rpc("ai_gate_consume", {
     p_user: userId,
     p_feature: feature,
+    p_credit_intent: intent,
   });
   if (error) throw error;
   return data as GateDecision;
