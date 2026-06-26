@@ -410,6 +410,18 @@ verify_jwt = false
 [functions.compute-due]
 verify_jwt = false
 
+# Settings data-export + account-deletion (S24) run under the caller's JWT.
+[functions.export-user-data]
+verify_jwt = true
+
+[functions.delete-account]
+verify_jwt = true
+
+# cleanup-exports is invoked by pg_cron (no user JWT); it authenticates with the
+# X-Cron-Secret header inside the handler.
+[functions.cleanup-exports]
+verify_jwt = false
+
 [edge_runtime]
 enabled = true
 # Supported request policies: `oneshot`, `per_worker`.
