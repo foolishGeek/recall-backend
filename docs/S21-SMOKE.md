@@ -3,7 +3,7 @@
 **Sprint:** S21 Insights (free + premium)
 **Environment:** `recall-staging`
 **Date:** 2026-06-26
-**Status:** Pending staging apply + deploy.
+**Status:** Backend deployed & smoke-verified on staging (migration + EF v3). Authenticated premium curl still manual.
 
 ## What S21 ships (backend)
 
