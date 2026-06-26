@@ -7,6 +7,7 @@ import { AppError } from "../../_shared/errors.ts";
 import { stripHtml, truncate } from "../../_shared/text.ts";
 import { generateJson, Tier } from "../../_shared/providers/route.ts";
 import { gateCheck, gateConsume, assertAllowed, logUsage } from "../../_shared/quota.ts";
+import { logInteraction } from "../../_shared/interactions.ts";
 import { requireString } from "../../_shared/validate.ts";
 import { QUIZ_GRADE_SYSTEM } from "../prompts.ts";
 
@@ -56,7 +57,9 @@ REFERENCE ANSWER: ${referenceAnswer}
 RUBRIC: ${rubric}
 STUDENT ANSWER: ${userAnswer}`;
 
+  const t0 = Date.now();
   const gen = await generateJson(config, tier, QUIZ_GRADE_SYSTEM, userPrompt);
+  const latencyMs = Date.now() - t0;
 
   const suggested = GRADES.includes(gen.json.suggested_grade as string)
     ? (gen.json.suggested_grade as string)
@@ -65,5 +68,17 @@ STUDENT ANSWER: ${userAnswer}`;
   const feedback = typeof gen.json.feedback === "string" ? gen.json.feedback : "";
 
   await logUsage(userId, "quiz_grade", gen.usage.input_tokens, gen.usage.output_tokens, gen.model);
+  await logInteraction({
+    userId,
+    feature: "quiz_grade",
+    scope: { node_id: payload.node_id ?? null },
+    hadNotes: nodeSnippet.length > 0,
+    blend: "notes_only",
+    model: gen.model,
+    latencyMs,
+    inputTokens: gen.usage.input_tokens,
+    outputTokens: gen.usage.output_tokens,
+    payload: { question, user_answer: userAnswer, suggested_grade: suggested, feedback },
+  });
   return { is_correct: isCorrect, suggested_grade: suggested, feedback, model: gen.model, usage: gen.usage };
 }

@@ -6,8 +6,11 @@ import { adminClient } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
 import { stripHtml, truncate } from "../../_shared/text.ts";
+import { nodeCorpusText } from "../../_shared/node_corpus.ts";
 import { generateJson, Tier } from "../../_shared/providers/route.ts";
 import { gateConsume, assertAllowed, logUsage } from "../../_shared/quota.ts";
+import { logInteraction } from "../../_shared/interactions.ts";
+import { userDirectives } from "../../_shared/user_prefs.ts";
 import { requireUuid } from "../../_shared/validate.ts";
 import { EVALUATE_SYSTEM } from "../prompts.ts";
 
@@ -23,7 +26,7 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
 
   const { data: node } = await db
     .from("nodes")
-    .select("title, priority, difficulty, comfort, extracted_text, content_hash, buckets!inner(user_id, deleted_at)")
+    .select("title, priority, difficulty, comfort, extracted_text, markdown, url, link_preview_json, content_hash, buckets!inner(user_id, deleted_at)")
     .eq("id", nodeId)
     .is("deleted_at", null)
     .maybeSingle();
@@ -43,7 +46,7 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
   if (n.content_hash) {
     const { data: cached } = await db
       .from("node_ai_evaluations")
-      .select("quality_score, suggested_comfort, suggested_difficulty, feedback, model, content_hash")
+      .select("quality_score, suggested_comfort, suggested_difficulty, feedback, suggested_markdown, model, content_hash")
       .eq("node_id", nodeId)
       .order("created_at", { ascending: false })
       .limit(1)
@@ -55,13 +58,22 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
         suggested_comfort: c.suggested_comfort,
         suggested_difficulty: c.suggested_difficulty,
         feedback: c.feedback,
+        suggested_markdown: c.suggested_markdown ?? null,
         model: c.model,
         cached: true,
+        interaction_id: null,
       };
     }
   }
 
-  const text = stripHtml(n.extracted_text);
+  const text = nodeCorpusText({
+    id: nodeId,
+    title: n.title,
+    extracted_text: n.extracted_text,
+    markdown: (node as { markdown?: string }).markdown,
+    url: (node as { url?: string }).url,
+    link_preview_json: (node as { link_preview_json?: Record<string, unknown> }).link_preview_json,
+  });
   if (!text) throw new AppError("empty_context");
 
   // Tags for the prompt.
@@ -88,12 +100,18 @@ tags: ${tags}
 CONTENT:
 ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
 
-  const gen = await generateJson(config, tier, EVALUATE_SYSTEM, userPrompt);
+  const system = EVALUATE_SYSTEM + (await userDirectives(userId));
+  const t0 = Date.now();
+  const gen = await generateJson(config, tier, system, userPrompt);
+  const latencyMs = Date.now() - t0;
 
   const quality = clampInt(gen.json.quality_score, 0, 100, 50);
   const comfort = clampInt(gen.json.suggested_comfort, 0, 100, n.comfort ?? 50);
   const difficulty = clampInt(gen.json.suggested_difficulty, 1, 5, n.difficulty ?? 3);
   const feedback = typeof gen.json.feedback === "string" ? gen.json.feedback : "";
+  const suggestedMarkdown = typeof gen.json.suggested_markdown === "string"
+    ? truncate(gen.json.suggested_markdown, config.int("ai_node_text_max_chars", 8000))
+    : null;
 
   const { error: insErr } = await db.from("node_ai_evaluations").insert({
     node_id: nodeId,
@@ -101,18 +119,35 @@ ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
     suggested_comfort: comfort,
     suggested_difficulty: difficulty,
     feedback,
+    suggested_markdown: suggestedMarkdown,
     model: gen.model,
     content_hash: n.content_hash,
   });
   if (insErr) throw insErr;
 
   await logUsage(userId, "evaluate", gen.usage.input_tokens, gen.usage.output_tokens, gen.model);
+  const interactionId = await logInteraction({
+    userId,
+    feature: "evaluate",
+    scope: { node_id: nodeId },
+    retrievedNodeIds: [nodeId],
+    hadNotes: true,
+    blend: "notes_only",
+    model: gen.model,
+    latencyMs,
+    inputTokens: gen.usage.input_tokens,
+    outputTokens: gen.usage.output_tokens,
+    payload: { note: text, suggested_markdown: suggestedMarkdown, feedback },
+    contentHash: n.content_hash ?? null,
+  });
   return {
     quality_score: quality,
     suggested_comfort: comfort,
     suggested_difficulty: difficulty,
     feedback,
+    suggested_markdown: suggestedMarkdown,
     model: gen.model,
     cached: false,
+    interaction_id: interactionId,
   };
 }
