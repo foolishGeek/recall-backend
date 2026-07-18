@@ -1,9 +1,10 @@
-// onboarding-emails — lifecycle emails after a user first confirms sign-up.
+// onboarding-emails — lifecycle emails after a user first signs in on the client.
 // Cron-driven (pg_cron every 2 min via invoke_onboarding_emails, 00036) and also
-// pinged instantly by the enqueue trigger, authenticated by the X-Cron-Secret
+// pinged on the first app_sessions insert (00038/00040) — real client session,
+// not magic-link request (autoconfirm sets auth.users too early). Auth: X-Cron-Secret
 // header (no user JWT), like cleanup-exports. Two queues:
-//   1. Welcome  — sent immediately on first confirm, from contact@ripplelabs.in.
-//   2. Founder  — sent ~15 min after sign-up, from avijit@ripplelabs.in.
+//   1. Welcome  — sent immediately on first client sign-in, from contact@ripplelabs.in.
+//   2. Founder  — sent ~15 min after that sign-in, from avijit@ripplelabs.in.
 // The onboarding_emails table is the send-status ledger: a *_sent_at is set only
 // after a successful Zoho send, so failures stay queued and retry next run (up to
 // an attempt cap). -> { welcomed, foundered, failed }.
