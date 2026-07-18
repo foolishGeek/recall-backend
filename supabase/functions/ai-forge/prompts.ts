@@ -41,8 +41,15 @@ Score quality 0-100 (clarity, atomicity, recall-friendly wording).
 Suggest comfort 0-100 (how well the user likely knows this if they wrote it today).
 Suggest difficulty 1-5 if content seems harder than current difficulty.
 Provide suggested_markdown: an improved version of the note in clean Markdown — atomic, clearly worded, easy to recall. Preserve the author's meaning and facts; do not invent new facts. Keep the same language as the note. If the note is already excellent, return it largely unchanged.
-feedback: two sentences max on what you changed and why.
-Output JSON only: { "quality_score":0-100, "suggested_comfort":0-100, "suggested_difficulty":1-5, "feedback":"Two sentences max.", "suggested_markdown":"..." }`;
+
+ASSETS (links, YouTube URLs, markdown links [text](url), image embeds ![…](…), PDF/image references):
+- These are separate from prose. NEVER remove, rewrite, invent, or "clean up" them in suggested_markdown.
+- Keep every standalone http(s) URL line at the end of the note, unchanged and in the same order.
+- Off-topic links stay; do not drop them.
+
+link_suggestions (optional): only when a clearly better replacement exists for an existing note URL, return up to 2 objects { "current_url", "suggested_url", "label" }. label is a short domain or title. Never invent brand-new links the user did not already have. Use [] when nothing clearly better exists.
+feedback: two sentences max on writing quality only — do NOT put URLs in feedback.
+Output JSON only: { "quality_score":0-100, "suggested_comfort":0-100, "suggested_difficulty":1-5, "feedback":"Two sentences max.", "suggested_markdown":"...", "link_suggestions":[] }`;
 
 export const QUIZ_GRADE_SYSTEM = `${BASE_SYSTEM}
 

@@ -1,12 +1,20 @@
 // Feature: evaluate (AI overview, separate quota). Cache by content_hash; on a
 // hit return the stored evaluation with no LLM call and no quota consumed.
 // Empty text → 422. Otherwise consume an overview, evaluate, persist.
+// Standalone URL lines / link_suggestions are preserved so Apply never drops
+// LINKED/WATCH cards.
 
 import { adminClient } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
-import { stripHtml, truncate } from "../../_shared/text.ts";
+import { truncate } from "../../_shared/text.ts";
 import { nodeCorpusText } from "../../_shared/node_corpus.ts";
+import {
+  collectNoteUrls,
+  mergeStandaloneUrls,
+  validateLinkSuggestions,
+  type LinkSuggestion,
+} from "../../_shared/note_links.ts";
 import { generateJson, Tier } from "../../_shared/providers/route.ts";
 import { gateConsume, assertAllowed, logUsage } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
@@ -39,6 +47,9 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
     difficulty?: number;
     comfort?: number;
     extracted_text?: string;
+    markdown?: string | null;
+    url?: string | null;
+    link_preview_json?: Record<string, unknown>;
     content_hash?: string | null;
   };
 
@@ -46,19 +57,28 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
   if (n.content_hash) {
     const { data: cached } = await db
       .from("node_ai_evaluations")
-      .select("quality_score, suggested_comfort, suggested_difficulty, feedback, suggested_markdown, model, content_hash")
+      .select(
+        "quality_score, suggested_comfort, suggested_difficulty, feedback, suggested_markdown, link_suggestions, model, content_hash",
+      )
       .eq("node_id", nodeId)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
     if (cached && (cached as { content_hash?: string }).content_hash === n.content_hash) {
       const c = cached as Record<string, unknown>;
+      // Defense: older cached rewrites may have dropped URL lines — re-merge
+      // before returning so the client never applies a stripped body.
+      const mergedCached = mergeStandaloneUrls(
+        n.markdown,
+        typeof c.suggested_markdown === "string" ? c.suggested_markdown : null,
+      );
       return {
         quality_score: c.quality_score,
         suggested_comfort: c.suggested_comfort,
         suggested_difficulty: c.suggested_difficulty,
         feedback: c.feedback,
-        suggested_markdown: c.suggested_markdown ?? null,
+        suggested_markdown: mergedCached,
+        link_suggestions: Array.isArray(c.link_suggestions) ? c.link_suggestions : [],
         model: c.model,
         cached: true,
         interaction_id: null,
@@ -70,9 +90,9 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
     id: nodeId,
     title: n.title,
     extracted_text: n.extracted_text,
-    markdown: (node as { markdown?: string }).markdown,
-    url: (node as { url?: string }).url,
-    link_preview_json: (node as { link_preview_json?: Record<string, unknown> }).link_preview_json,
+    markdown: n.markdown,
+    url: n.url,
+    link_preview_json: n.link_preview_json,
   });
   if (!text) throw new AppError("empty_context");
 
@@ -109,9 +129,17 @@ ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
   const comfort = clampInt(gen.json.suggested_comfort, 0, 100, n.comfort ?? 50);
   const difficulty = clampInt(gen.json.suggested_difficulty, 1, 5, n.difficulty ?? 3);
   const feedback = typeof gen.json.feedback === "string" ? gen.json.feedback : "";
-  const suggestedMarkdown = typeof gen.json.suggested_markdown === "string"
+  const rawMarkdown = typeof gen.json.suggested_markdown === "string"
     ? truncate(gen.json.suggested_markdown, config.int("ai_node_text_max_chars", 8000))
     : null;
+  const suggestedMarkdown = mergeStandaloneUrls(n.markdown, rawMarkdown);
+
+  const noteUrls = collectNoteUrls(n.markdown, n.url);
+  const linkSuggestions: LinkSuggestion[] = validateLinkSuggestions(
+    gen.json.link_suggestions,
+    noteUrls,
+    2,
+  );
 
   const { error: insErr } = await db.from("node_ai_evaluations").insert({
     node_id: nodeId,
@@ -120,6 +148,7 @@ ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
     suggested_difficulty: difficulty,
     feedback,
     suggested_markdown: suggestedMarkdown,
+    link_suggestions: linkSuggestions,
     model: gen.model,
     content_hash: n.content_hash,
   });
@@ -137,7 +166,12 @@ ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
     latencyMs,
     inputTokens: gen.usage.input_tokens,
     outputTokens: gen.usage.output_tokens,
-    payload: { note: text, suggested_markdown: suggestedMarkdown, feedback },
+    payload: {
+      note: text,
+      suggested_markdown: suggestedMarkdown,
+      feedback,
+      link_suggestions: linkSuggestions,
+    },
     contentHash: n.content_hash ?? null,
   });
   return {
@@ -146,6 +180,7 @@ ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
     suggested_difficulty: difficulty,
     feedback,
     suggested_markdown: suggestedMarkdown,
+    link_suggestions: linkSuggestions,
     model: gen.model,
     cached: false,
     interaction_id: interactionId,
