@@ -9,6 +9,10 @@
 import { Webhook } from "https://esm.sh/standardwebhooks@1.0.0";
 import { sendSmtp } from "../_shared/smtp.ts";
 
+// Supabase edge runtime global: keeps the worker alive for a background task
+// after the response is returned.
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
+
 const SUBJECT = "Your sign-in link to Recall";
 
 type EmailData = {
@@ -219,28 +223,30 @@ Deno.serve(async (req) => {
     `${supabaseUrl}/storage/v1/object/public/brand-assets`;
   const html = brandedHtml(url, markBase);
 
-  try {
-    await sendSmtp({
-      host: "mail.smtp2go.com",
-      port: 587,
-      user: smtpUser,
-      pass: smtpPass,
-      from: `Recall <${smtpUser}>`,
-      to: user.email,
-      subject: SUBJECT,
-      html,
-    });
-  } catch (err) {
-    console.error("smtp send failed", err);
-    return new Response(
-      JSON.stringify({
-        error: {
-          message: err instanceof Error ? err.message : String(err),
-          http_code: 500,
-        },
-      }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+  // Send in the background and return 200 immediately. The GoTrue Send Email
+  // hook has a short response timeout; a slow STARTTLS handshake (especially on
+  // a cold start) can exceed it, making the app show a failed magic-link request
+  // even though SMTP2GO already accepted the message and the email arrives.
+  // Deferring the send keeps the hook fast so the app reliably reflects success.
+  // The hook only fires when GoTrue has already generated a valid link, so the
+  // email is still only triggered on a successful magic-link request.
+  const send = sendSmtp({
+    host: "mail.smtp2go.com",
+    port: 587,
+    user: smtpUser,
+    pass: smtpPass,
+    from: `Recall <${smtpUser}>`,
+    to: user.email,
+    subject: SUBJECT,
+    html,
+  }).catch((err) => {
+    console.error("auth-send-email: smtp send failed", err);
+  });
+
+  if (typeof EdgeRuntime !== "undefined") {
+    EdgeRuntime.waitUntil(send);
+  } else {
+    await send;
   }
 
   return new Response(JSON.stringify({}), {
