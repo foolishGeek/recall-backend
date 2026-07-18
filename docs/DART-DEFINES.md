@@ -37,14 +37,25 @@ flutter run \
 **Project ref:** `cpyhkjourabizancgkjm`  
 **Publishable key:** stored in `secrets/LOCAL-SECRETS.md`.
 
+Preferred (gitignored file — never commit):
+
+```bash
+cp config/prod.example.json config/prod.json   # fill from secrets/LOCAL-SECRETS.md
+fvm flutter run --flavor prod --dart-define-from-file=config/prod.json
+```
+
+Or inline:
+
 ```bash
 flutter run \
   --dart-define=ENV=prod \
   --dart-define=SUPABASE_URL=https://cpyhkjourabizancgkjm.supabase.co \
   --dart-define=SUPABASE_ANON_KEY=<from secrets/LOCAL-SECRETS.md> \
-  --dart-define=SENTRY_DSN=<prod-sentry-dsn> \
-  --dart-define=REVENUECAT_API_KEY=<rc-prod-sdk-key>
+  --dart-define=SENTRY_DSN=<prod-sentry-dsn-or-empty> \
+  --dart-define=REVENUECAT_API_KEY=<rc-prod-sdk-key-or-empty>
 ```
+
+First IAP wave uses **RC staging** (`app.recall.staging`); leave prod `REVENUECAT_API_KEY` empty until RC prod is wired (see [`S23-SMOKE.md`](S23-SMOKE.md)).
 
 ---
 
