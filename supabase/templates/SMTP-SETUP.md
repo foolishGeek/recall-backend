@@ -1,9 +1,9 @@
 # Email Template & SMTP Setup
 
-## How auth emails are sent (staging — live)
+## How auth emails are sent (staging + prod — live)
 
 GoTrue's built-in template renderer was falling back to the default plain
-"Confirm your email address" email on this free-tier project even after Custom
+"Confirm your email address" email on free-tier projects even after Custom
 SMTP + custom templates were stored via the Management API. So branding is
 owned by the **Send Email Auth Hook**, not GoTrue templates:
 
@@ -13,12 +13,12 @@ owned by the **Send Email Auth Hook**, not GoTrue templates:
    `templates/magic_link.html`) and sends it via SMTP2GO
    (`mail.smtp2go.com:587`, from `no-reply@ripplelabs.in`).
 
-| Piece | Value |
-|---|---|
-| Function | [`supabase/functions/auth-send-email`](../functions/auth-send-email/index.ts) |
-| Hook URI | `https://vxbqzzebiuxzywmekdex.supabase.co/functions/v1/auth-send-email` |
-| Subject | `Your sign-in link to Recall` |
-| Secrets | `SEND_EMAIL_HOOK_SECRET`, `SMTP2GO_USER`, `SMTP2GO_PASS` (EF secrets) |
+| Piece | Staging | Prod |
+|---|---|---|
+| Function | `auth-send-email` | same |
+| Hook URI | `https://vxbqzzebiuxzywmekdex.supabase.co/functions/v1/auth-send-email` | `https://cpyhkjourabizancgkjm.supabase.co/functions/v1/auth-send-email` |
+| Subject | `Your sign-in link to Recall` | same |
+| Secrets | `SEND_EMAIL_HOOK_SECRET`, `SMTP2GO_USER`, `SMTP2GO_PASS` | same names; **prod hook secret is separate** |
 
 `verify_jwt = false` for this function — Auth signs with the webhook secret.
 
