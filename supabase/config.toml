@@ -230,8 +230,9 @@ secure_password_change = false
 max_frequency = "1s"
 # Number of characters used in the email OTP.
 otp_length = 6
-# Number of seconds before the email OTP expires (defaults to 1 hour).
-otp_expiry = 3600
+# Number of seconds before the email OTP / magic link expires. Set to 15 min to
+# match the "expires in 15 minutes" copy in the magic link email template.
+otp_expiry = 900
 
 # Use a production-ready SMTP server
 # [auth.email.smtp]
@@ -247,8 +248,10 @@ otp_expiry = 3600
 subject = "Your sign-in link to Recall"
 content_path = "./supabase/templates/magic_link.html"
 
+# Passwordless (magic link) app: signInWithOtp sends this "confirm signup" email
+# to brand-new users, so it uses the same branded sign-in design as magic_link.
 [auth.email.template.confirmation]
-subject = "Confirm your Recall account"
+subject = "Your sign-in link to Recall"
 content_path = "./supabase/templates/confirmation.html"
 
 [auth.email.template.recovery]
@@ -401,6 +404,10 @@ verify_jwt = true
 [functions.extract-pdf-text]
 verify_jwt = true
 
+# Auth Send Email hook — Auth signs with webhook secret, not a JWT.
+[functions.auth-send-email]
+verify_jwt = false
+
 # RevenueCat posts with its own signature, not a Supabase JWT.
 [functions.revenuecat-webhook]
 verify_jwt = false
@@ -420,6 +427,11 @@ verify_jwt = true
 # cleanup-exports is invoked by pg_cron (no user JWT); it authenticates with the
 # X-Cron-Secret header inside the handler.
 [functions.cleanup-exports]
+verify_jwt = false
+
+# onboarding-emails is invoked by pg_cron + an auth.users enqueue trigger (no user
+# JWT); it authenticates with the X-Cron-Secret header inside the handler.
+[functions.onboarding-emails]
 verify_jwt = false
 
 [edge_runtime]
