@@ -132,11 +132,17 @@ export async function sendDrop(
     message: {
       token,
       notification: {
-        title: "Recall Drop",
-        body: "Some cards are ready — a quick review keeps them fresh.",
+        title: "Your cards are ready",
+        body: "A fresh set is ready to review — tap to open Today.",
       },
       data,
-      android: { priority: "HIGH" },
+      android: {
+        priority: "HIGH",
+        notification: {
+          channel_id: "recall_drops",
+          notification_priority: "PRIORITY_HIGH",
+        },
+      },
       apns: { headers: { "apns-priority": "10" } },
     },
   };
