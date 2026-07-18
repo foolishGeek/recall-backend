@@ -68,11 +68,15 @@ over Zoho SMTP (`smtppro.zoho.in:587`, STARTTLS) via the shared client
 ### How it works
 
 1. Migration [`00036_onboarding_emails.sql`](../migrations/00036_onboarding_emails.sql)
-   adds the `onboarding_emails` **send-status ledger** (one row per confirmed
-   user), an `AFTER INSERT OR UPDATE ON auth.users` trigger that enqueues a row on
-   the `confirmed_at` null->set transition and pings the function for an instant
-   welcome, and a pg_cron job `onboarding-emails-2min` (`*/2 * * * *`) that is the
-   guaranteed driver + retry safety net.
+   adds the `onboarding_emails` **send-status ledger** (one row per user) and a
+   pg_cron job `onboarding-emails-2min` (`*/2 * * * *`) as the guaranteed
+   driver + retry safety net.
+   [`00038_onboarding_on_app_session.sql`](../migrations/00038_onboarding_on_app_session.sql)
+   enqueues on the user's **first `app_sessions` insert** (mobile client only
+   writes that after it holds a real session). Do **not** key off
+   `auth.users.confirmed_at` / `last_sign_in_at` — with autoconfirm, GoTrue sets
+   those when the magic link is *requested*, so welcome was firing next to the
+   magic-link email before the user clicked.
 2. Edge Function [`onboarding-emails`](../functions/onboarding-emails/index.ts)
    (auth: `X-Cron-Secret`, `verify_jwt = false`) processes two queues each run:
    - Welcome: `welcome_sent_at IS NULL AND welcome_attempts < 6`.
