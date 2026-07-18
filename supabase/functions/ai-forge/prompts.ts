@@ -60,15 +60,21 @@ export function quizGenerateSystem(
   difficulty: number,
   questionType: string,
 ): string {
+  const typeGuide = questionType === "mix"
+    ? `Format: MIX — rotate mcq, then short_answer, then flashcard across all ${questionCount} questions. Each question's "type" must be one of those three (never "mix").`
+    : questionType === "short_answer"
+    ? `Format: SHORT ANSWER only — every question has type "short_answer" with prompt, reference_answer, grading_rubric, explanation, source_node_ids.`
+    : questionType === "flashcard"
+    ? `Format: FLASHCARD only — every question has type "flashcard" with prompt (front), flashcard_back (back), explanation, source_node_ids.`
+    : `Format: MCQ only — every question has type "mcq" with prompt, exactly 4 options, correct_index (0-3), explanation, source_node_ids.`;
+
   return `${BASE_SYSTEM}
 
-Generate exactly ${questionCount} quiz questions on the topic(s) in CONTEXT and the USER PROMPT.
+Generate quiz questions grounded in CONTEXT (the user's notes) when note content is provided.
 Difficulty target: ${difficulty}/5 (1=easy, 5=hard).
-Question type: ${questionType}.
-- Prefer questions grounded in the user's CONTEXT (their notes); set source_node_ids to the node ids used.
-- You MAY add broader questions on the same topics from general knowledge to enrich the set; for those, leave source_node_ids empty.
-- Make every question self-contained and unambiguous; never reveal the answer inside the prompt text.
-Output JSON only with shape:
-{ "questions": [ { "position":0, "type":"${questionType}", "prompt":"", "options":["A","B","C","D"], "correct_index":0, "explanation":"", "reference_answer":"", "grading_rubric":"", "flashcard_back":"", "node_id":null, "source_node_ids":[] } ] }
-Include only the fields relevant to the question type.`;
+${typeGuide}
+- Set source_node_ids to node ids from CONTEXT that informed each question.
+- You MAY add broader questions on the same topics; leave source_node_ids empty for those.
+- Keep prompts concise; never reveal the answer inside the prompt text.
+Output a single JSON object: { "questions": [ ... ] }`;
 }

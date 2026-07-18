@@ -14,7 +14,7 @@ export async function anthropicGenerateJson(args: GenerateArgs): Promise<Generat
     },
     body: JSON.stringify({
       model: args.model,
-      max_tokens: 1024,
+      max_tokens: args.maxTokens ?? 2048,
       temperature: 0.2,
       system: `${args.system}\nRespond with valid JSON only. No prose, no code fences.`,
       messages: [{ role: "user", content: args.user }],

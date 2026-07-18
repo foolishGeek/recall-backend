@@ -7,7 +7,7 @@
 
 import { AppConfig } from "../config.ts";
 import { AppError } from "../errors.ts";
-import { GenerationResult, Usage } from "./types.ts";
+import { GenerationResult, Usage, GenerateArgs } from "./types.ts";
 import { geminiGenerateJson } from "./gemini.ts";
 import { anthropicGenerateJson } from "./anthropic.ts";
 import { openaiGenerateJson } from "./openai.ts";
@@ -21,9 +21,10 @@ export interface RoutedResult {
 }
 
 function premiumModelId(label: string): string {
-  // app_config stores the display label "claude-sonnet"; map it to an API id.
-  if (label.startsWith("claude-") && label.includes("-2")) return label; // already a full id
-  return "claude-3-5-sonnet-latest";
+  // app_config stores the display label "claude-sonnet"; map to a current API id.
+  if (label.startsWith("claude-") && label.includes("-2")) return label;
+  if (label.startsWith("claude-sonnet-4")) return label;
+  return "claude-sonnet-4-20250514";
 }
 
 function parseJsonLoose(text: string): Record<string, unknown> | null {
@@ -45,7 +46,7 @@ function parseJsonLoose(text: string): Record<string, unknown> | null {
   }
 }
 
-type Generate = (a: { system: string; user: string; apiKey: string; model: string }) => Promise<GenerationResult>;
+type Generate = (a: GenerateArgs) => Promise<GenerationResult>;
 
 async function attempt(
   gen: Generate,
@@ -53,8 +54,9 @@ async function attempt(
   user: string,
   apiKey: string,
   model: string,
+  maxTokens?: number,
 ): Promise<{ json: Record<string, unknown>; usage: Usage }> {
-  const first = await gen({ system, user, apiKey, model });
+  const first = await gen({ system, user, apiKey, model, maxTokens });
   const parsed = parseJsonLoose(first.text);
   if (parsed) return { json: parsed, usage: first.usage };
 
@@ -64,6 +66,7 @@ async function attempt(
     user: `${user}\n\nIMPORTANT: Output valid JSON only.`,
     apiKey,
     model,
+    maxTokens,
   });
   const reparsed = parseJsonLoose(second.text);
   if (reparsed) {
@@ -83,6 +86,7 @@ export async function generateJson(
   tier: Tier,
   system: string,
   user: string,
+  maxTokens?: number,
 ): Promise<RoutedResult> {
   const fallbackModel = config.str("ai_model_fallback", "gpt-4o-mini");
   const openaiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
@@ -103,12 +107,12 @@ export async function generateJson(
 
   try {
     if (!primaryKey) throw new AppError("provider_error", "Primary provider key missing.");
-    const out = await attempt(primaryGen, system, user, primaryKey, primaryModel);
+    const out = await attempt(primaryGen, system, user, primaryKey, primaryModel, maxTokens);
     return { json: out.json, model: primaryModel, usage: out.usage };
   } catch (err) {
     // Fall back to GPT-4o-mini once on any primary failure.
     if (!openaiKey) throw err instanceof AppError ? err : new AppError("provider_error");
-    const out = await attempt(openaiGenerateJson, system, user, openaiKey, fallbackModel);
+    const out = await attempt(openaiGenerateJson, system, user, openaiKey, fallbackModel, maxTokens);
     return { json: out.json, model: fallbackModel, usage: out.usage };
   }
 }

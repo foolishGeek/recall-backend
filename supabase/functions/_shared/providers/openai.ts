@@ -14,6 +14,7 @@ export async function openaiGenerateJson(args: GenerateArgs): Promise<Generation
     body: JSON.stringify({
       model: args.model,
       temperature: 0.2,
+      max_tokens: args.maxTokens ?? 2048,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: args.system },

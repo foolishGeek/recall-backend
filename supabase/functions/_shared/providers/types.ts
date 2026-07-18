@@ -17,4 +17,6 @@ export interface GenerateArgs {
   user: string;
   apiKey: string;
   model: string;
+  /** Output token budget; quiz generation needs more than short JSON replies. */
+  maxTokens?: number;
 }

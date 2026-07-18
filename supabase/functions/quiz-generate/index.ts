@@ -96,15 +96,18 @@ Deno.serve(async (req) => {
             position: q.position,
           })),
         )
-        .select("id, question_json")
-        .order("position", { ascending: true });
+        .select("id, question_json, position");
       if (questionsErr) throw questionsErr;
+
+      const ordered = [...(inserted ?? [])].sort(
+        (a, b) => Number((a as { position: number }).position) - Number((b as { position: number }).position),
+      );
 
       return jsonResponse({
         attempt_id: attemptId,
         timer_sec: quizConfig.timer_sec,
         question_count: actualCount,
-        questions: (inserted ?? []).map((row: { id: string; question_json: Record<string, unknown> }) =>
+        questions: ordered.map((row: { id: string; question_json: Record<string, unknown> }) =>
           redactedQuestion(row.question_json, row.id)
         ),
       });

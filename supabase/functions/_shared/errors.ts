@@ -87,6 +87,17 @@ export function toErrorResponse(err: unknown): Response {
   if (err instanceof AppError) {
     return errorResponse(err.code, err.message, err.extra);
   }
+
+  // Supabase/PostgREST errors surface as plain objects with { message, code, details }.
+  if (err && typeof err === "object" && "message" in err) {
+    const pg = err as { message?: string; details?: string; hint?: string };
+    const detail = [pg.message, pg.details, pg.hint].filter(Boolean).join(" — ");
+    if (detail) {
+      console.error("Database error:", detail);
+      return errorResponse("provider_error", detail);
+    }
+  }
+
   console.error("Unhandled edge function error:", err);
   return errorResponse("provider_error", "Unexpected server error.");
 }

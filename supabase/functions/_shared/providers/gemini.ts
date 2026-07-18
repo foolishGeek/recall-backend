@@ -16,6 +16,7 @@ export async function geminiGenerateJson(args: GenerateArgs): Promise<Generation
       contents: [{ role: "user", parts: [{ text: args.user }] }],
       generationConfig: {
         temperature: 0.2,
+        maxOutputTokens: args.maxTokens ?? 2048,
         responseMimeType: "application/json",
       },
     }),

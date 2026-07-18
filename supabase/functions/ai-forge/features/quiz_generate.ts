@@ -11,11 +11,12 @@
 
 import { adminClient } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
+import { AppError } from "../../_shared/errors.ts";
 import { truncate } from "../../_shared/text.ts";
 import { formatContext, RetrievedChunk } from "../../_shared/context.ts";
 import { nodeCorpusText, NodeRow } from "../../_shared/node_corpus.ts";
 import { openaiEmbed } from "../../_shared/providers/openai.ts";
-import { generateJson, Tier } from "../../_shared/providers/route.ts";
+import { generateQuizQuestions, normalizeQuestions } from "../quiz_json.ts";
 import { gateConsume, assertAllowed, logUsage } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
 import { userDirectives } from "../../_shared/user_prefs.ts";
@@ -24,6 +25,19 @@ import { asUuidArray } from "../../_shared/validate.ts";
 import { quizGenerateSystem } from "../prompts.ts";
 
 const CORPUS_FIELDS = "id, title, extracted_text, markdown, url, link_preview_json, bucket_id";
+
+function typeLabel(questionType: string): string {
+  switch (questionType) {
+    case "short_answer":
+      return "short answer";
+    case "flashcard":
+      return "flashcard";
+    case "mix":
+      return "mix (mcq → short answer → flashcard, repeating)";
+    default:
+      return "multiple choice";
+  }
+}
 
 export async function quizGenerate(payload: Record<string, unknown>, userId: string, config: AppConfig) {
   const mode = ["freehand", "by_bucket", "by_node"].includes(payload.mode as string)
@@ -44,13 +58,19 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
   let context = "";
   let topics = "";
   const retrievedNodeIds = new Set<string>();
+  let scopeLabel = "";
+  const sourceNodeTitles: string[] = [];
 
   const corpusBlocks = (rows: NodeRow[]): string => {
     const per = Math.floor(maxChars / Math.max(rows.length, 1));
     return rows
       .map((n) => {
         const text = nodeCorpusText(n);
-        if (text) retrievedNodeIds.add(n.id);
+        if (text) {
+          retrievedNodeIds.add(n.id);
+          const title = (n.title ?? "").trim() || "Untitled note";
+          sourceNodeTitles.push(title);
+        }
         return text ? `[Node: ${n.title ?? ""} | id:${n.id}]\n${truncate(text, per)}` : "";
       })
       .filter((b) => b.length > 0)
@@ -62,25 +82,46 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
     if (nodeIds.length) {
       const { data: nodes } = await db
         .from("nodes")
-        .select(`${CORPUS_FIELDS}, buckets!inner(user_id)`)
+        .select(`${CORPUS_FIELDS}, buckets!inner(user_id, name)`)
         .in("id", nodeIds)
         .is("deleted_at", null);
       const owned = (nodes ?? []).filter(
         (n: { buckets?: { user_id?: string } }) => n.buckets?.user_id === userId,
       ) as NodeRow[];
       context = corpusBlocks(owned);
+      const bucketNames = [
+        ...new Set(
+          (nodes ?? [])
+            .map((n: { buckets?: { name?: string } }) => n.buckets?.name ?? "")
+            .filter(Boolean),
+        ),
+      ];
+      scopeLabel = sourceNodeTitles.length
+        ? `notes: ${sourceNodeTitles.join(", ")}`
+        : `${nodeIds.length} selected note(s)`;
+      if (bucketNames.length) scopeLabel += ` (buckets: ${bucketNames.join(", ")})`;
     }
   } else if (mode === "by_bucket") {
     const bucketIds = requestedBuckets ?? [];
     if (bucketIds.length) {
-      // Heat-weighted sample: surface weaker / more-overdue nodes first.
+      const { data: bucketRows } = await db
+        .from("buckets")
+        .select("id, name")
+        .in("id", bucketIds)
+        .is("deleted_at", null);
+      const bucketNames = (bucketRows ?? []).map((b: { name?: string }) => b.name ?? "").filter(Boolean);
+      scopeLabel = bucketNames.length
+        ? `buckets: ${bucketNames.join(", ")}`
+        : `${bucketIds.length} bucket(s)`;
+
+      // Due-first sample: earliest due nodes first (user priority via due_at).
       const { data: nodes } = await db
         .from("nodes")
-        .select(`${CORPUS_FIELDS}, comfort, due_at, buckets!inner(user_id)`)
+        .select(`${CORPUS_FIELDS}, comfort, due_at, priority, buckets!inner(user_id)`)
         .in("bucket_id", bucketIds)
         .is("deleted_at", null)
-        .order("comfort", { ascending: true, nullsFirst: true })
-        .order("due_at", { ascending: true, nullsFirst: true })
+        .order("due_at", { ascending: true, nullsFirst: false })
+        .order("priority", { ascending: false })
         .limit(questionCount * 2);
       const owned = (nodes ?? []).filter(
         (n: { buckets?: { user_id?: string } }) => n.buckets?.user_id === userId,
@@ -150,25 +191,62 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
     // Web grounding hook (no-op today) — merged into context when enabled.
     const web = await webContext([prompt, topics].filter(Boolean).join(". "), config);
     if (web.text) context = [context, `[Web]\n${web.text}`].filter(Boolean).join("\n---\n");
+    if (requestedBuckets?.length) {
+      const { data: bucketRows } = await db
+        .from("buckets")
+        .select("name")
+        .in("id", requestedBuckets)
+        .is("deleted_at", null);
+      const names = (bucketRows ?? []).map((b: { name?: string }) => b.name ?? "").filter(Boolean);
+      if (names.length) scopeLabel = `buckets: ${names.join(", ")}`;
+    } else if (useMyNotes) {
+      scopeLabel = "all active buckets";
+    }
+  }
+
+  if ((mode === "by_bucket" || mode === "by_node") && !context.trim()) {
+    throw new AppError(
+      "empty_context",
+      "Selected notes have no readable content yet. Add text to your notes and try again.",
+    );
   }
 
   const decision = await gateConsume(userId, "quiz_generate");
   assertAllowed(decision);
-  const tier = (decision.tier ?? "free") as Tier;
 
   const system = quizGenerateSystem(questionCount, difficulty, questionType) + (await userDirectives(userId));
-  const userPrompt = `TOPICS: ${topics || "(from the user prompt)"}
+  const modeLine = `MODE: ${mode}${scopeLabel ? ` · ${scopeLabel}` : ""}`;
+  const notesLine = useMyNotes || mode !== "freehand"
+    ? `Ground questions in CONTEXT below. Every question must reflect the selected notes/buckets when content is present.`
+    : `CONTEXT is optional; lean on the USER PROMPT and general knowledge.`;
+  const userPrompt = `${modeLine}
+${notesLine}
+TOPICS: ${topics || "(from prompt and notes)"}
+QUESTION FORMAT: ${typeLabel(questionType)} · exactly ${questionCount} questions · difficulty ${difficulty}/5
+
 CONTEXT:
 ${context || "(no notes provided)"}
 
-USER PROMPT (freehand only): ${prompt}
+USER PROMPT${mode === "freehand" ? "" : " (ignored for this mode)"}: ${prompt || "(none)"}
 
-Generate ${questionCount} questions of type ${questionType}.`;
+Generate ${questionCount} questions. Respect the requested format above.`;
   const t0 = Date.now();
-  const gen = await generateJson(config, tier, system, userPrompt);
+  const gen = await generateQuizQuestions({
+    config,
+    system,
+    userPrompt,
+    questionCount,
+    questionType,
+  });
   const latencyMs = Date.now() - t0;
 
-  const questions = Array.isArray(gen.json.questions) ? gen.json.questions : [];
+  const questions = normalizeQuestions({ questions: gen.questions });
+  if (!questions.length) {
+    throw new AppError(
+      "provider_error",
+      "No quiz questions were generated. Try fewer questions or add more note content.",
+    );
+  }
 
   await logUsage(userId, "quiz_generate", gen.usage.input_tokens, gen.usage.output_tokens, gen.model);
   const hadNotes = context.length > 0;
