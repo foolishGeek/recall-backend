@@ -45,11 +45,17 @@ Provide suggested_markdown: an improved version of the note in clean Markdown �
 ASSETS (links, YouTube URLs, markdown links [text](url), image embeds ![…](…), PDF/image references):
 - These are separate from prose. NEVER remove, rewrite, invent, or "clean up" them in suggested_markdown.
 - Keep every standalone http(s) URL line at the end of the note, unchanged and in the same order.
-- Off-topic links stay; do not drop them.
+- Off-topic links stay in suggested_markdown; do not drop them.
 
-link_suggestions (optional): only when a clearly better replacement exists for an existing note URL, return up to 2 objects { "current_url", "suggested_url", "label" }. label is a short domain or title. Never invent brand-new links the user did not already have. Use [] when nothing clearly better exists.
+link_suggestions — closer-match replacements for EXISTING note URLs (shown as a quiet Use/Dismiss nudge; never auto-applied):
+- Look at NOTE URLS in the user message. For each URL that is weak, off-topic, personal, or not a good study source for this note's topic, propose one better public educational URL (Wikipedia, Khan Academy, HyperPhysics, a well-known textbook/course page, etc.).
+- current_url MUST be copied EXACTLY from NOTE URLS (character-for-character).
+- suggested_url MAY be a new URL the user does not already have — that is the point of this field.
+- label: short domain or page title (not a long URL).
+- Prefer suggesting whenever a note URL is clearly unrelated to the topic (e.g. a personal site on a physics note). Use [] only when every NOTE URL already fits the topic well, or NOTE URLS is empty.
+- Max 2 objects. Never invent current_url values that are not in NOTE URLS.
 feedback: two sentences max on writing quality only — do NOT put URLs in feedback.
-Output JSON only: { "quality_score":0-100, "suggested_comfort":0-100, "suggested_difficulty":1-5, "feedback":"Two sentences max.", "suggested_markdown":"...", "link_suggestions":[] }`;
+Output JSON only: { "quality_score":0-100, "suggested_comfort":0-100, "suggested_difficulty":1-5, "feedback":"Two sentences max.", "suggested_markdown":"...", "link_suggestions":[{"current_url":"...","suggested_url":"...","label":"..."}] }`;
 
 export const QUIZ_GRADE_SYSTEM = `${BASE_SYSTEM}
 

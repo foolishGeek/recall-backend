@@ -30,6 +30,9 @@ function clampInt(v: unknown, lo: number, hi: number, fallback: number): number 
 
 export async function evaluate(payload: Record<string, unknown>, userId: string, config: AppConfig) {
   const nodeId = requireUuid(payload.node_id, "node_id");
+  // Regenerate taps set force_refresh so a stale cache (e.g. empty link_suggestions)
+  // does not block a fresh overview.
+  const forceRefresh = payload.force_refresh === true;
   const db = adminClient();
 
   const { data: node } = await db
@@ -54,7 +57,7 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
   };
 
   // Cache hit: latest evaluation matches the current content_hash.
-  if (n.content_hash) {
+  if (!forceRefresh && n.content_hash) {
     const { data: cached } = await db
       .from("node_ai_evaluations")
       .select(
@@ -110,12 +113,20 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
   assertAllowed(decision);
   const tier = (decision.tier ?? "free") as Tier;
 
+  const noteUrls = collectNoteUrls(n.markdown, n.url);
+  const noteUrlsBlock = noteUrls.length > 0
+    ? noteUrls.map((u) => `- ${u}`).join("\n")
+    : "(none)";
+
   const userPrompt = `NODE METADATA:
 title: ${n.title ?? ""}
 priority: ${n.priority ?? 3}
 difficulty: ${n.difficulty ?? 3}
 comfort_seed: ${n.comfort ?? 50}
 tags: ${tags}
+
+NOTE URLS (copy current_url exactly from this list when suggesting):
+${noteUrlsBlock}
 
 CONTENT:
 ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
@@ -134,7 +145,6 @@ ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
     : null;
   const suggestedMarkdown = mergeStandaloneUrls(n.markdown, rawMarkdown);
 
-  const noteUrls = collectNoteUrls(n.markdown, n.url);
   const linkSuggestions: LinkSuggestion[] = validateLinkSuggestions(
     gen.json.link_suggestions,
     noteUrls,

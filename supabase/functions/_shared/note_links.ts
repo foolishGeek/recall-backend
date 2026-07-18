@@ -42,6 +42,29 @@ function normalizeUrl(u: string): string {
   return u.trim().replace(/\/+$/, "").toLowerCase();
 }
 
+/** Match note URLs even when the model drops www / trailing slash / case. */
+function urlsMatch(a: string, b: string): boolean {
+  if (normalizeUrl(a) === normalizeUrl(b)) return true;
+  try {
+    const ua = new URL(a.trim());
+    const ub = new URL(b.trim());
+    const hostA = ua.hostname.replace(/^www\./, "").toLowerCase();
+    const hostB = ub.hostname.replace(/^www\./, "").toLowerCase();
+    const pathA = ua.pathname.replace(/\/+$/, "").toLowerCase() || "/";
+    const pathB = ub.pathname.replace(/\/+$/, "").toLowerCase() || "/";
+    return hostA === hostB && pathA === pathB;
+  } catch {
+    return false;
+  }
+}
+
+function findNoteUrl(candidate: string, noteUrls: string[]): string | null {
+  for (const u of noteUrls) {
+    if (urlsMatch(candidate, u)) return u;
+  }
+  return null;
+}
+
 function isHttpUrl(u: string): boolean {
   try {
     const uri = new URL(u.trim());
@@ -65,6 +88,7 @@ function shortLabel(url: string, provided?: string): string {
 /**
  * Keep only suggestions that replace an existing note URL with a different
  * valid http(s) URL. Cap at [max] (default 2).
+ * current_url is normalized back to the note's exact string for client matching.
  */
 export function validateLinkSuggestions(
   raw: unknown,
@@ -73,21 +97,22 @@ export function validateLinkSuggestions(
 ): LinkSuggestion[] {
   if (!Array.isArray(raw) || noteUrls.length === 0 || max <= 0) return [];
 
-  const noteSet = new Set(noteUrls.map(normalizeUrl));
   const seenCurrent = new Set<string>();
   const out: LinkSuggestion[] = [];
 
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
     const row = item as Record<string, unknown>;
-    const current = typeof row.current_url === "string" ? row.current_url.trim() : "";
+    const currentRaw = typeof row.current_url === "string" ? row.current_url.trim() : "";
     const suggested = typeof row.suggested_url === "string"
       ? row.suggested_url.trim()
       : "";
-    if (!current || !suggested) continue;
-    if (!isHttpUrl(current) || !isHttpUrl(suggested)) continue;
-    if (!noteSet.has(normalizeUrl(current))) continue;
-    if (normalizeUrl(current) === normalizeUrl(suggested)) continue;
+    if (!currentRaw || !suggested) continue;
+    if (!isHttpUrl(currentRaw) || !isHttpUrl(suggested)) continue;
+
+    const current = findNoteUrl(currentRaw, noteUrls);
+    if (!current) continue;
+    if (urlsMatch(current, suggested)) continue;
 
     const key = normalizeUrl(current);
     if (seenCurrent.has(key)) continue;
@@ -106,21 +131,27 @@ export function validateLinkSuggestions(
   return out;
 }
 
-/** All http(s) URLs worth treating as note assets (standalone lines + any in text). */
+const ANY_URL = /https?:\/\/[^\s)\]<>"']+/gi;
+
+/** All http(s) URLs in the note (standalone lines, inline, legacy url column). */
 export function collectNoteUrls(
   markdown: string | null | undefined,
   legacyUrl?: string | null,
 ): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  const add = (u: string) => {
+  const add = (raw: string) => {
+    const u = raw.trim().replace(/[.,;:!?]+$/, "");
     const n = normalizeUrl(u);
     if (!n || seen.has(n)) return;
     if (!isHttpUrl(u)) return;
     seen.add(n);
-    out.push(u.trim());
+    out.push(u);
   };
   for (const u of standaloneUrls(markdown)) add(u);
+  if (markdown) {
+    for (const m of markdown.matchAll(ANY_URL)) add(m[0]);
+  }
   if (legacyUrl) add(legacyUrl);
   return out;
 }
