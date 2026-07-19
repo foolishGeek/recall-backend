@@ -13,6 +13,8 @@ Temporary `limits_profile = "relaxed"` raises free caps while Play / BillDesk pa
 | `session_size_free` | 12 |
 | `ai_model_free` | `gemini-2.5-flash-lite` |
 
+While `limits_profile = "relaxed"`, **memory simulation** (`retention-simulate`) is open to all tiers — You + Insights show the full simulation ledger. Rolling back to canon restores the premium-only gate.
+
 ## Canon (rollback target)
 
 | Key | Value |
