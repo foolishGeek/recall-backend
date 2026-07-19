@@ -20,3 +20,5 @@ supabase/.temp
 
 # Deno / Edge Functions local cache (when functions exist)
 **/.deno/
+
+hosting/public/downloads/*.apk

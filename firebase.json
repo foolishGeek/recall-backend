@@ -1,1 +1,14 @@
-{}
+{
+  "hosting": {
+    "public": "hosting/public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "**/downloads/**"
+    ]
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}
