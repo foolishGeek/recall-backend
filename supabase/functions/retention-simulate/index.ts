@@ -11,7 +11,7 @@ import { handlePreflight } from "../_shared/cors.ts";
 import { resolveCaller } from "../_shared/auth.ts";
 import { AppError, jsonResponse, toErrorResponse } from "../_shared/errors.ts";
 import { assertAllowed, gateCheck } from "../_shared/quota.ts";
-import { AppConfig } from "../_shared/config.ts";
+import { assertPremiumAccess } from "../_shared/premium.ts";
 import { adminClient } from "../_shared/supabase.ts";
 
 Deno.serve(async (req) => {
@@ -28,11 +28,7 @@ Deno.serve(async (req) => {
     const gate = await gateCheck(caller.userId);
     assertAllowed(gate);
 
-    if (gate.tier !== "premium") {
-      const config = await AppConfig.load();
-      const profile = config.str("limits_profile", "canon");
-      if (profile !== "relaxed") throw new AppError("premium_required");
-    }
+    await assertPremiumAccess(gate.tier);
 
     const db = adminClient();
     const { data: result, error: rpcErr } = await db.rpc("retention_simulate_rpc", {
