@@ -40,10 +40,14 @@ Staging infra remains the daily driver. Recall-prod (`cpyhkjourabizancgkjm`) cut
 ### RevenueCat (prod) — after first IAP wave on RC staging
 
 - [ ] Prod app (`app.recall`) linked to Play / App Store
-- [ ] Entitlement `premium`, offering `default`, same 4 SKUs `[D-PAY-1]`
+- [ ] Entitlement `premium`, offering `default`, same 4 product ids `[D-PAY-1]`
+  - Play store ids: `recall_premium_monthly:<basePlan>`, `recall_premium_yearly:<basePlan>` (prefer reuse `recall-01` / `recall-02`; if different, update mobile `playMonthlyStoreId` / `playYearlyStoreId` or rely on `matchesProductId` prefix match)
+  - Consumables: `ai_credits_100`, `ai_credits_500` (no `premium` entitlement)
 - [ ] Webhook URL: `https://cpyhkjourabizancgkjm.supabase.co/functions/v1/revenuecat-webhook`
-- [ ] Real `REVENUECAT_REST_API_KEY` + webhook secret dedicated to prod RC
-- [ ] Public SDK keys for prod dart-define
+- [ ] Real `REVENUECAT_REST_API_KEY` + webhook secret dedicated to prod RC (replace placeholder)
+- [ ] Public SDK keys for prod dart-define (`config/prod.json` `REVENUECAT_API_KEY`)
+- [ ] Money gate: one Closed/Internal sandbox purchase → `subscriptions` flip on Recall-prod → refund/expire path
+- [ ] Do not promote public Production track until Wave A smoke A–G + money gate pass ([`S23-SMOKE.md`](S23-SMOKE.md))
 
 ### Firebase / FCM
 

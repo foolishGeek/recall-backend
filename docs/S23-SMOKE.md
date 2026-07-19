@@ -14,24 +14,45 @@ Wave A proves the purchase → webhook → tier code path. Wave B proves the lau
 
 ---
 
+## Locked staging Play store IDs (Wave A)
+
+| Play / RC store identifier | Play product | Base plan | Type |
+|----------------------------|--------------|-----------|------|
+| `recall_premium_monthly:recall-01` | `recall_premium_monthly` | `recall-01` | subscription → entitlement `premium` |
+| `recall_premium_yearly:recall-02` | `recall_premium_yearly` | `recall-02` | subscription → entitlement `premium` |
+| `ai_credits_100` | `ai_credits_100` | — | consumable (+100) |
+| `ai_credits_500` | `ai_credits_500` | — | consumable (+500) |
+
+- Entitlement `premium`: **only** the two subscriptions (credits = 0 entitlements).
+- Offering `default` (Current): monthly → `recall_premium_monthly:recall-01`, annual → `recall_premium_yearly:recall-02`.
+- App matches bare id **or** `product:basePlan` via `RevenueCatService.matchesProductId`.
+
+If RC shows **Not found**: products are missing/Draft in Play for `app.recall.staging`, or AAB not on a testing track. Activate in Play → wait → Import/refresh in RC.
+
+---
+
 ## Prerequisites (block on these)
 
 ### Wave A — RC staging
 
-- [ ] Signed AAB for `app.recall.staging` on Play **Internal testing** (or Internal app sharing); install via Play opt-in link (not a debug sideload).
-- [ ] Play products **Active**: `recall_premium_monthly`, `recall_premium_yearly`, `ai_credits_100`, `ai_credits_500`.
-- [ ] RevenueCat staging app linked to Play **service-account JSON** + Real-Time Developer Notifications.
-- [ ] **License testers** added (accelerated renewals: monthly ~5 min; auto-cancel after ~6 cycles).
-- [ ] Staging dart-defines / `config/staging.json` with staging `REVENUECAT_API_KEY`.
-- [ ] Staging webhook URL: `https://vxbqzzebiuxzywmekdex.supabase.co/functions/v1/revenuecat-webhook`.
+- [x] RC service-account JSON uploaded → **Valid credentials** (catalog + purchases API).
+- [x] RTDN connected (`projects/recall-spaced-staging/topics/…`) + Play test notification sent (grant `google-play-developer-notifications@system.gserviceaccount.com` **Pub/Sub Publisher** on the topic if Play test fails).
+- [x] Staging `config/staging.json` `REVENUECAT_API_KEY` (`goog_…`).
+- [x] Staging webhook URL: `https://vxbqzzebiuxzywmekdex.supabase.co/functions/v1/revenuecat-webhook`.
+- [ ] Play products **Active** with exact IDs above (fix RC **Not found**).
+- [ ] Signed AAB for `app.recall.staging` on Play **Internal testing**; install via Play opt-in (not sideload).
+  - Local build ready: `recall-mobile/build/app/outputs/bundle/stagingRelease/app-staging-release.aab` (upload to Internal testing).
+- [ ] **License testers** added (`RESPOND_NORMALLY`).
+- [ ] Offering `default` Current with monthly + yearly packages wired to the locked store ids.
+- [ ] Credits detached from `premium` in RC.
 
 ### Wave B — RC prod (after A)
 
-- [ ] Prod Play app `app.recall` + Active products + service account + RTDN.
-- [ ] Prod RC entitlement `premium`, offering `default`, same 4 SKUs.
-- [ ] Webhook → `https://cpyhkjourabizancgkjm.supabase.co/functions/v1/revenuecat-webhook` with a **prod-dedicated** Authorization secret (replace the placeholder on Recall-prod).
+- [ ] Prod Play app `app.recall` + Active products (same product ids; base plans may reuse `recall-01`/`recall-02` or new ids — update app constants if base plans differ).
+- [ ] Prod RC entitlement `premium`, offering `default`, same catalog.
+- [ ] Webhook → `https://cpyhkjourabizancgkjm.supabase.co/functions/v1/revenuecat-webhook` with a **prod-dedicated** Authorization secret.
 - [ ] Real `REVENUECAT_REST_API_KEY` on prod EF secrets.
-- [ ] `config/prod.json` `REVENUECAT_API_KEY` = prod public SDK key.
+- [ ] `config/prod.json` `REVENUECAT_API_KEY` = prod public SDK key (`goog_…`).
 
 ---
 
@@ -49,9 +70,9 @@ Wave A proves the purchase → webhook → tier code path. Wave B proves the lau
 
 ### C. Sandbox purchase
 
-- [ ] License tester buys Premium monthly.
+- [ ] License tester buys Premium monthly (`recall_premium_monthly:recall-01`).
 - [ ] RC: `INITIAL_PURCHASE`, environment `SANDBOX`, entitlement `premium` active.
-- [ ] DB: `subscriptions.tier=premium`, `will_renew=true`, `expires_at` set; `profiles.had_premium=true`.
+- [ ] DB: `subscriptions.tier=premium`, `will_renew=true`, `expires_at` set; `profiles.had_premium=true`; `product_id` may be the full Play store id.
 - [ ] App tier flips within ~60s (webhook) or sooner via `getCustomerInfo()` fast-path.
 
 ### D. Lifecycle (accelerated clock)
@@ -87,22 +108,10 @@ Wave A proves the purchase → webhook → tier code path. Wave B proves the lau
 
 ---
 
-## SKUs / entitlement (canonical)
+## App Store (deferred)
 
-| ID | Type |
-|----|------|
-| `recall_premium_monthly` | subscription |
-| `recall_premium_yearly` | subscription (−20% vs 12× monthly) |
-| `ai_credits_100` | consumable |
-| `ai_credits_500` | consumable |
-| Entitlement | `premium` |
-| Offering | `default` |
-
----
-
-## Related
-
-- App: `recall-mobile/lib/data/services/revenuecat_service.dart`
+Blocked until Apple Developer enrollment (S00). When ready: same 4 product ids in App Store Connect (no Play base-plan suffix), RC iOS app + `appl_…` key, sandbox purchase/restore mirroring Wave A. Do not block Android Wave A on this.
 - EF: `recall-backend/supabase/functions/revenuecat-webhook/`
-- SQL: `00025_revenuecat_webhook.sql`
+- SQL: `00025_revenuecat_webhook.sql`, `00042_revenuecat_product_base_plan.sql`, `00043_limits_profile_relaxed.sql`
+- Limits rollback while payments settle: [`LIMITS-ROLLBACK.md`](LIMITS-ROLLBACK.md)
 - Sprint: [`Roadmap/sprints/S23-paywall.md`](../../Roadmap/sprints/S23-paywall.md)
