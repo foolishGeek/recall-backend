@@ -10,6 +10,7 @@
 -- eligibility/queue RPC (all rewritten in 00030/00032/00033/00047). The stub is
 -- intentionally left in place because older migrations reference it; dropping the
 -- function object is unnecessary and higher-risk than leaving a no-op.
+-- (Superseded by 00053 — heat helpers + legacy w1..w8 columns removed.)
 
 SET search_path = public, extensions;
 
