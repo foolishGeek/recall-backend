@@ -197,11 +197,10 @@ $$;
 REVOKE ALL ON FUNCTION compute_due_candidates() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION compute_due_candidates() TO service_role;
 
--- 6. next_drop_time_rpc — honest ETA under the watermark + re-nudge model.
--- Returns the earliest time a Drop could realistically fire: not before the
--- min-interval since the last send, aligned to the 5-min cron, using the next
--- card maturity when nothing is due yet, pushed out of quiet hours and past any
--- blocking bucket cooldown. NULL when the user has no buckets.
+-- 6. next_drop_time_rpc — ETA aligned with compute_due_candidates triggers.
+-- Mirrors threshold / P5 / re-nudge / min-interval / max_per_day, then aligns
+-- to the 5-min cron and quiet hours. When every bucket is cooling, returns the
+-- soonest cooldown wakeup (never NULL while due work is only hidden by cooldown).
 CREATE OR REPLACE FUNCTION next_drop_time_rpc(bucket_id uuid DEFAULT NULL)
 RETURNS timestamptz
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
@@ -211,14 +210,21 @@ DECLARE
   di record;
   scope_ids uuid[];
   last_sent_at timestamptz;
-  due_now_count integer;
+  due_now_count integer := 0;
+  newly_due integer := 0;
+  new_overdue_p5 boolean := false;
+  seen_since_last boolean := false;
+  sent_today integer := 0;
   next_due timestamptz;
+  need_more integer;
   candidate timestamptz;
   local_now timestamp;
   local_minutes integer;
   start_minutes integer;
   end_minutes integer;
   min_cooldown timestamptz;
+  all_cooling boolean := false;
+  tz text;
 BEGIN
   IF p_user IS NULL THEN
     RAISE EXCEPTION 'unauthorized' USING ERRCODE = '42501';
@@ -233,7 +239,8 @@ BEGIN
     RAISE EXCEPTION 'unauthorized' USING ERRCODE = '42501';
   END IF;
 
-  -- Scope: a single bucket, or all non-deleted buckets currently out of cooldown.
+  tz := COALESCE(p.timezone, 'UTC');
+
   IF bucket_id IS NULL THEN
     SELECT array_agg(id) INTO scope_ids
     FROM buckets
@@ -247,8 +254,13 @@ BEGIN
     FROM buckets
     WHERE user_id = p_user AND deleted_at IS NULL
       AND (cooldown_until IS NULL OR cooldown_until <= now());
+
+    all_cooling := (scope_ids IS NULL OR COALESCE(array_length(scope_ids, 1), 0) = 0);
   ELSE
     scope_ids := ARRAY[bucket_id];
+    SELECT COALESCE(cooldown_until > now(), false) INTO all_cooling
+    FROM buckets
+    WHERE id = bucket_id AND user_id = p_user AND deleted_at IS NULL;
   END IF;
 
   SELECT * INTO di FROM drop_intensity(p.drop_frequency);
@@ -257,38 +269,140 @@ BEGIN
   FROM notification_events
   WHERE user_id = p_user AND type = 'sent'::notification_event_type;
 
-  -- Anything due right now among revision-enabled cards in scope?
-  SELECT count(*)::integer INTO due_now_count
-  FROM nodes n
-  WHERE scope_ids IS NOT NULL
-    AND n.bucket_id = ANY(scope_ids)
-    AND n.deleted_at IS NULL
-    AND n.sr_enabled
-    AND n.state <> 'leech'::node_state
-    AND n.state IN ('learning'::node_state, 'review'::node_state, 'relearning'::node_state)
-    AND n.due_at IS NOT NULL
-    AND n.due_at <= now();
+  SELECT count(*)::integer INTO sent_today
+  FROM notification_events ne
+  WHERE ne.user_id = p_user
+    AND ne.type = 'sent'::notification_event_type
+    AND (ne.created_at AT TIME ZONE tz)::date = (now() AT TIME ZONE tz)::date;
 
-  IF due_now_count > 0 THEN
-    -- Work is ready; the next cron tick is the earliest opportunity.
-    candidate := now();
-  ELSE
-    -- Otherwise the next card to mature drives the ETA.
-    SELECT min(n.due_at) INTO next_due
+  IF NOT all_cooling THEN
+    SELECT
+      count(*)::integer,
+      count(*) FILTER (
+        WHERE n.due_at > COALESCE(last_sent_at, '-infinity'::timestamptz)
+      )::integer,
+      COALESCE(bool_or(
+        n.priority = 5
+        AND n.due_at > COALESCE(last_sent_at, '-infinity'::timestamptz)
+      ), false)
+    INTO due_now_count, newly_due, new_overdue_p5
     FROM nodes n
-    WHERE scope_ids IS NOT NULL
-      AND n.bucket_id = ANY(scope_ids)
+    WHERE n.bucket_id = ANY(scope_ids)
       AND n.deleted_at IS NULL
       AND n.sr_enabled
       AND n.state <> 'leech'::node_state
       AND n.state IN ('learning'::node_state, 'review'::node_state, 'relearning'::node_state)
       AND n.due_at IS NOT NULL
-      AND n.due_at > now();
+      AND n.due_at <= now();
+
+    SELECT
+      EXISTS (
+        SELECT 1 FROM notification_events ne2
+        WHERE ne2.user_id = p_user
+          AND ne2.type = 'opened'::notification_event_type
+          AND ne2.created_at > COALESCE(last_sent_at, '-infinity'::timestamptz)
+      )
+      OR EXISTS (
+        SELECT 1 FROM reviews r
+        WHERE r.user_id = p_user
+          AND r.reviewed_at > COALESCE(last_sent_at, '-infinity'::timestamptz)
+      )
+    INTO seen_since_last;
+  END IF;
+
+  -- Same fire conditions as compute_due_candidates (minus device tokens).
+  IF NOT all_cooling AND (
+    newly_due >= di.threshold
+    OR new_overdue_p5
+    OR (
+      di.renudge_hours > 0
+      AND due_now_count > 0
+      AND last_sent_at IS NOT NULL
+      AND last_sent_at <= now() - make_interval(hours => di.renudge_hours)
+      AND NOT seen_since_last
+    )
+  ) THEN
+    candidate := now();
+  ELSIF NOT all_cooling
+    AND due_now_count > 0
+    AND di.renudge_hours > 0
+    AND last_sent_at IS NOT NULL
+    AND NOT seen_since_last
+  THEN
+    -- Standing due work; waiting for the re-nudge window.
+    candidate := last_sent_at + make_interval(hours => di.renudge_hours);
+  ELSIF NOT all_cooling AND newly_due < di.threshold THEN
+    -- Need more cards to mature to hit the intensity threshold.
+    need_more := GREATEST(di.threshold - newly_due, 1);
+    SELECT due_at INTO next_due
+    FROM (
+      SELECT n.due_at,
+             row_number() OVER (ORDER BY n.due_at ASC) AS rn
+      FROM nodes n
+      WHERE n.bucket_id = ANY(scope_ids)
+        AND n.deleted_at IS NULL
+        AND n.sr_enabled
+        AND n.state <> 'leech'::node_state
+        AND n.state IN ('learning'::node_state, 'review'::node_state, 'relearning'::node_state)
+        AND n.due_at IS NOT NULL
+        AND n.due_at > now()
+    ) ranked
+    WHERE rn = need_more;
 
     IF next_due IS NULL THEN
-      RETURN NULL; -- nothing scheduled to announce
+      -- Fewer upcoming cards than needed for the threshold: use the next
+      -- maturity as a progressive ETA (UI updates as more cards appear).
+      SELECT min(n.due_at) INTO next_due
+      FROM nodes n
+      WHERE n.bucket_id = ANY(scope_ids)
+        AND n.deleted_at IS NULL
+        AND n.sr_enabled
+        AND n.state <> 'leech'::node_state
+        AND n.state IN ('learning'::node_state, 'review'::node_state, 'relearning'::node_state)
+        AND n.due_at IS NOT NULL
+        AND n.due_at > now();
     END IF;
-    candidate := next_due;
+
+    IF next_due IS NOT NULL THEN
+      candidate := next_due;
+    ELSIF due_now_count > 0 AND di.renudge_hours = 0 THEN
+      -- Gentle + standing due below threshold and no future cards: no Drop
+      -- until more work appears (matches candidates: no renudge path).
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  -- All buckets cooling, or no candidate yet → soonest cooldown wakeup.
+  IF candidate IS NULL THEN
+    IF bucket_id IS NULL THEN
+      SELECT min(cooldown_until) INTO min_cooldown
+      FROM buckets
+      WHERE user_id = p_user
+        AND deleted_at IS NULL
+        AND cooldown_until IS NOT NULL
+        AND cooldown_until > now();
+    ELSE
+      SELECT cooldown_until INTO min_cooldown
+      FROM buckets
+      WHERE id = bucket_id
+        AND user_id = p_user
+        AND deleted_at IS NULL
+        AND cooldown_until IS NOT NULL
+        AND cooldown_until > now();
+    END IF;
+
+    IF min_cooldown IS NULL THEN
+      RETURN NULL;
+    END IF;
+    candidate := min_cooldown;
+  END IF;
+
+  -- Daily cap: if already at max, earliest is next local midnight.
+  IF sent_today >= di.max_per_day THEN
+    candidate := GREATEST(
+      candidate,
+      ((date_trunc('day', now() AT TIME ZONE tz) + interval '1 day') AT TIME ZONE tz)
+    );
   END IF;
 
   -- Never before the min-interval since the last Drop.
@@ -307,7 +421,7 @@ BEGIN
 
   -- Push out of quiet hours to the window end.
   IF p.quiet_hours_start IS NOT NULL AND p.quiet_hours_end IS NOT NULL THEN
-    local_now := candidate AT TIME ZONE COALESCE(p.timezone, 'UTC');
+    local_now := candidate AT TIME ZONE tz;
     local_minutes := extract(hour FROM local_now)::integer * 60 + extract(minute FROM local_now)::integer;
     start_minutes := extract(hour FROM p.quiet_hours_start)::integer * 60 + extract(minute FROM p.quiet_hours_start)::integer;
     end_minutes := extract(hour FROM p.quiet_hours_end)::integer * 60 + extract(minute FROM p.quiet_hours_end)::integer;
@@ -320,12 +434,12 @@ BEGIN
       candidate := (
         (date_trunc('day', local_now)::date + p.quiet_hours_end)
         + CASE WHEN start_minutes > end_minutes AND local_minutes >= start_minutes THEN interval '1 day' ELSE interval '0' END
-      ) AT TIME ZONE COALESCE(p.timezone, 'UTC');
+      ) AT TIME ZONE tz;
     END IF;
   END IF;
 
-  -- If every bucket is cooling, the soonest Drop is when the first one wakes.
-  IF bucket_id IS NULL THEN
+  -- If the only path was cooldown-hidden work, keep candidate at wakeup.
+  IF bucket_id IS NULL AND NOT all_cooling THEN
     SELECT min(cooldown_until) INTO min_cooldown
     FROM buckets
     WHERE user_id = p_user
@@ -338,17 +452,19 @@ BEGIN
           AND b2.deleted_at IS NULL
           AND (b2.cooldown_until IS NULL OR b2.cooldown_until <= candidate)
       );
-  ELSE
+    IF min_cooldown IS NOT NULL THEN
+      candidate := min_cooldown;
+    END IF;
+  ELSIF bucket_id IS NOT NULL THEN
     SELECT cooldown_until INTO min_cooldown
     FROM buckets
     WHERE id = bucket_id
       AND user_id = p_user
       AND deleted_at IS NULL
       AND cooldown_until > candidate;
-  END IF;
-
-  IF min_cooldown IS NOT NULL THEN
-    candidate := min_cooldown;
+    IF min_cooldown IS NOT NULL THEN
+      candidate := min_cooldown;
+    END IF;
   END IF;
 
   RETURN candidate;

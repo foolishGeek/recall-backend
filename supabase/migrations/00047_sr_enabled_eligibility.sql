@@ -1,16 +1,18 @@
--- Honour nodes.sr_enabled (00045) in every place that decides "is this note
+-- Honour nodes.sr_enabled (00046) in every place that decides "is this note
 -- schedulable / due right now". A note with sr_enabled = false is a plain saved
 -- note: it never enters a stack, the Today ring, the due preview, the ahead
--- count, or (via 00049) a Recall Drop.
+-- count, or (via 00050) a Recall Drop.
 --
 -- These are faithful re-creations of the latest bodies:
 --   generate_stack_rpc      (00033)
 --   today_summary_rpc       (00032)
 --   due_pool_preview_rpc    (00030)
 --   review_ahead_count_rpc  (00030)
+--   abandon_stack_rpc       (00033) — remaining-due cooldown clear
 -- with a single added predicate `AND n.sr_enabled` on the node scan.
--- compute_due_candidates is handled in 00049 (its re-nudge rewrite includes the
+-- compute_due_candidates is handled in 00050 (its re-nudge rewrite includes the
 -- same filter) to avoid re-declaring that body twice.
+-- Also refreshes v_bucket_heat / v_insights_summary so badges match Today.
 --
 -- CREATE OR REPLACE keeps this idempotent; grants are re-asserted at the end.
 
@@ -440,6 +442,114 @@ BEGIN
 END;
 $$;
 
+-- ---------------------------------------------------------------------
+-- abandon_stack_rpc — 00033 body + sr_enabled on remaining-due scan
+-- Without this, opted-out notes keep cooldowns stuck (or clear them when
+-- stacks/Today correctly ignore those notes).
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION abandon_stack_rpc(p_stack_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  p_user uuid := auth.uid();
+  s_row stacks%ROWTYPE;
+  scope_ids uuid[];
+  v_now timestamptz := now();
+  cleared_ids uuid[] := ARRAY[]::uuid[];
+  was_active boolean;
+BEGIN
+  IF p_user IS NULL THEN
+    RAISE EXCEPTION 'unauthorized' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT * INTO s_row
+  FROM stacks
+  WHERE id = p_stack_id
+    AND user_id = p_user
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'unauthorized' USING ERRCODE = '42501';
+  END IF;
+
+  was_active := (s_row.status = 'active');
+
+  IF was_active THEN
+    UPDATE stacks
+    SET status = 'abandoned',
+        updated_at = v_now
+    WHERE id = p_stack_id;
+  END IF;
+
+  IF s_row.status IN ('active'::stack_status, 'abandoned'::stack_status) THEN
+    scope_ids := COALESCE(
+      (SELECT array_agg(x::uuid) FROM jsonb_array_elements_text(s_row.scope->'bucket_ids') x),
+      ARRAY[]::uuid[]
+    );
+
+    WITH remaining AS (
+      SELECT DISTINCT n.bucket_id
+      FROM nodes n
+      WHERE n.bucket_id = ANY(scope_ids)
+        AND n.deleted_at IS NULL
+        AND n.sr_enabled
+        AND n.state <> 'leech'::node_state
+        AND (
+          n.state = 'new'::node_state
+          OR (
+            n.state IN ('learning'::node_state, 'review'::node_state, 'relearning'::node_state)
+            AND n.due_at IS NOT NULL
+            AND n.due_at <= v_now
+          )
+        )
+    ),
+    cleared AS (
+      UPDATE buckets b
+      SET cooldown_until = NULL,
+          updated_at = v_now
+      FROM remaining r
+      WHERE b.id = r.bucket_id
+        AND b.user_id = p_user
+        AND b.deleted_at IS NULL
+        AND b.cooldown_until IS NOT NULL
+        AND b.cooldown_until > v_now
+      RETURNING b.id
+    )
+    SELECT COALESCE(array_agg(id), ARRAY[]::uuid[]) INTO cleared_ids FROM cleared;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'status', CASE WHEN was_active THEN 'abandoned' ELSE s_row.status::text END,
+    'already_finalized', NOT was_active,
+    'cleared_bucket_ids', to_jsonb(cleared_ids)
+  );
+END;
+$$;
+
+-- Badge views: due counts must match the revision pipeline (sr_enabled).
+CREATE OR REPLACE VIEW v_bucket_heat WITH (security_invoker = true) AS
+SELECT b.id AS bucket_id, b.user_id,
+       count(n.*) AS node_count,
+       count(*) FILTER (WHERE n.sr_enabled AND n.due_at <= now()) AS due_count,
+       max(n.priority) FILTER (WHERE n.sr_enabled) AS dominant_priority
+FROM buckets b LEFT JOIN nodes n ON n.bucket_id = b.id AND n.deleted_at IS NULL
+WHERE b.deleted_at IS NULL
+GROUP BY b.id, b.user_id;
+
+CREATE OR REPLACE VIEW v_insights_summary WITH (security_invoker = true) AS
+SELECT p.id AS user_id, p.current_streak,
+  (SELECT round(100.0 * count(*) FILTER (WHERE r.reviewed_at <= r.due_before)
+              / NULLIF(count(*) FILTER (WHERE r.due_before IS NOT NULL),0), 1)
+     FROM reviews r WHERE r.user_id = p.id AND r.reviewed_at >= now() - interval '7 days') AS adherence_7d,
+  (SELECT count(DISTINCT activity_date) FROM daily_activity d WHERE d.user_id = p.id) AS days_with_reviews,
+  (SELECT count(*) FROM nodes n JOIN buckets b ON b.id = n.bucket_id
+     WHERE b.user_id = p.id AND n.deleted_at IS NULL AND n.sr_enabled
+       AND n.due_at::date = current_date) AS due_today,
+  (SELECT count(*) FROM nodes n JOIN buckets b ON b.id = n.bucket_id
+     WHERE b.user_id = p.id AND n.deleted_at IS NULL AND n.sr_enabled
+       AND n.due_at < now()) AS overdue
+FROM profiles p;
+
 -- Re-assert least-privilege grants (unchanged from source migrations).
 REVOKE ALL ON FUNCTION generate_stack_rpc(uuid[], boolean, integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION generate_stack_rpc(uuid[], boolean, integer) TO authenticated;
@@ -452,3 +562,6 @@ GRANT EXECUTE ON FUNCTION due_pool_preview_rpc(integer) TO authenticated;
 
 REVOKE ALL ON FUNCTION review_ahead_count_rpc() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION review_ahead_count_rpc() TO authenticated;
+
+REVOKE ALL ON FUNCTION abandon_stack_rpc(uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION abandon_stack_rpc(uuid) TO authenticated;

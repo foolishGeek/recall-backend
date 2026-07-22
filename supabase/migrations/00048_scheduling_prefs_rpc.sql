@@ -29,6 +29,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   p_user uuid := auth.uid();
   v_clamped numeric;
+  parent scheduling_params%ROWTYPE;
 BEGIN
   IF p_user IS NULL THEN
     RAISE EXCEPTION 'unauthorized' USING ERRCODE = '42501';
@@ -58,17 +59,40 @@ BEGIN
 
   v_clamped := LEAST(0.97, GREATEST(0.80, p_target_retention));
 
+  -- engine_params() picks ONE whole row (bucket > user > global). A bare
+  -- INSERT of target_retention alone would materialize column DEFAULTs
+  -- (e.g. lookahead_hours=12) and override the patched global knobs from
+  -- 00030. Copy the inherited parent row's engine fields, then only change
+  -- retention. ON CONFLICT updates retention only — other knobs stay put.
   IF p_bucket_id IS NULL THEN
-    INSERT INTO scheduling_params (user_id, bucket_id, target_retention)
-    VALUES (p_user, NULL, v_clamped)
-    ON CONFLICT (user_id, bucket_id)
-    DO UPDATE SET target_retention = EXCLUDED.target_retention;
+    SELECT * INTO parent
+    FROM scheduling_params
+    WHERE user_id IS NULL AND bucket_id IS NULL;
   ELSE
-    INSERT INTO scheduling_params (user_id, bucket_id, target_retention)
-    VALUES (p_user, p_bucket_id, v_clamped)
-    ON CONFLICT (user_id, bucket_id)
-    DO UPDATE SET target_retention = EXCLUDED.target_retention;
+    SELECT * INTO parent FROM engine_params(p_user, NULL);
   END IF;
+
+  IF parent.id IS NULL THEN
+    RAISE EXCEPTION 'invalid_input: scheduling_params missing' USING ERRCODE = '22023';
+  END IF;
+
+  INSERT INTO scheduling_params (
+    user_id, bucket_id, target_retention,
+    w1, w2, w3, w4, w5, w6, w7, w8,
+    s_min, comfort_k, hard_penalty, easy_bonus,
+    new_per_day, session_size, max_new_per_stack, max_per_bucket,
+    lookahead_hours, temperature, drop_threshold, leech_lapse_threshold
+  ) VALUES (
+    p_user, p_bucket_id, v_clamped,
+    parent.w1, parent.w2, parent.w3, parent.w4,
+    parent.w5, parent.w6, parent.w7, parent.w8,
+    parent.s_min, parent.comfort_k, parent.hard_penalty, parent.easy_bonus,
+    parent.new_per_day, parent.session_size, parent.max_new_per_stack,
+    parent.max_per_bucket, parent.lookahead_hours, parent.temperature,
+    parent.drop_threshold, parent.leech_lapse_threshold
+  )
+  ON CONFLICT (user_id, bucket_id)
+  DO UPDATE SET target_retention = EXCLUDED.target_retention;
 
   RETURN get_scheduling_prefs_rpc(p_bucket_id);
 END;

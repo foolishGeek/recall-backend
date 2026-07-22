@@ -83,7 +83,7 @@ $$;
 
 REVOKE ALL ON FUNCTION invoke_compute_due() FROM PUBLIC, anon, authenticated;
 
--- Daily device-token hygiene (00049.prune_stale_device_tokens).
+-- Daily device-token hygiene (00050.prune_stale_device_tokens).
 CREATE OR REPLACE FUNCTION invoke_prune_device_tokens() RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
