@@ -40,7 +40,8 @@ RETURNS TABLE (
   renudge_hours integer
 )
 LANGUAGE sql STABLE SET search_path = public AS $$
-  SELECT * FROM (
+  SELECT v.threshold, v.min_interval_min, v.max_per_day, v.renudge_hours
+  FROM (
     VALUES
       ('weekly', 8, 240, 3, 0),                                        -- Gentle
       ('3xwk',   5,  60, 6, app_config_int('drop_renudge_hours', 2)),  -- Standard
