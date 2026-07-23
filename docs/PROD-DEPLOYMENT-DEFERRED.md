@@ -13,7 +13,7 @@ Staging infra remains the daily driver. Recall-prod (`cpyhkjourabizancgkjm`) cut
 - [x] Auth site URL + redirect (`app.recall://login-callback`); email OTP
 - [x] Send Email Auth Hook → `auth-send-email` (SMTP2GO, same mailbox as staging)
 - [x] Brand assets in public `brand-assets` Storage bucket
-- [x] Migrations `00001`–`00058` applied (engine-ux-overhaul: honest next-drop, drop_debug, engine hardening, calibration/auto-tune + FSRS-optimizer pipeline — auto-tune & per-user weights ship behind default-off kill-switches); real `app_config` limits (50 AI / 2 overviews / session 8 / drop budgets)
+- [x] Migrations `00001`–`00059` applied (engine-ux-overhaul through ASAO Reminder style / `drop_intensity` threshold 1; auto-tune & per-user weights ship behind default-off kill-switches); real `app_config` limits (50 AI / 2 overviews / session 8 / drop budgets)
 - [x] Vault: `app_supabase_url`, `app_service_role_key`, `app_cron_secret`
 - [x] Cron jobs: `compute-due-5min`, `cleanup-exports-hourly`, `onboarding-emails-2min`
 - [x] All 15 Edge Functions deployed
