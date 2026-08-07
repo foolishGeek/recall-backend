@@ -100,3 +100,14 @@ Rules:
 - Grounded in the note titles and tags provided; never invent a note title.
 - Each question under 80 characters. No numbering, no quotes around the whole list.
 Output JSON only: { "suggestions": ["…", "…", "…"] }`;
+
+// Folds the older half of a long chat into a recap so the prompt stays bounded.
+// Facts and open threads matter; pleasantries do not.
+export const CHAT_SUMMARY_SYSTEM = `You compress part of a study chat into a short recap.
+Rules:
+- Keep what a later reply would need: topics covered, facts established, the user's
+  stated preferences, and any question left unanswered.
+- Keep note titles and proper nouns exactly as written.
+- Drop greetings, filler and repetition. Never invent anything.
+- Under 150 words, third person, no bullet points.
+Output JSON only: { "summary": "…" }`;
