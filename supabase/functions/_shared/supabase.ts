@@ -4,6 +4,8 @@
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+export type { SupabaseClient };
+
 let cached: SupabaseClient | null = null;
 
 export function adminClient(): SupabaseClient {

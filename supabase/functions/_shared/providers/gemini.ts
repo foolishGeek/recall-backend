@@ -1,36 +1,38 @@
 // Google Gemini provider (free tier). Uses generateContent with a JSON response
 // mime type so the model returns parseable JSON.
 
-import { AppError } from "../errors.ts";
+import { postJson } from "./http.ts";
 import { GenerateArgs, GenerationResult } from "./types.ts";
 
-export async function geminiGenerateJson(args: GenerateArgs): Promise<GenerationResult> {
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${args.model}:generateContent?key=${args.apiKey}`;
+const DEFAULT_TEMPERATURE = 0.2;
+const DEFAULT_MAX_TOKENS = 2048;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+export async function geminiGenerateJson(args: GenerateArgs): Promise<GenerationResult> {
+  const json = await postJson({
+    provider: "gemini",
+    url:
+      `https://generativelanguage.googleapis.com/v1beta/models/${args.model}:generateContent?key=${args.apiKey}`,
+    headers: {},
+    signal: args.signal,
+    timeoutMs: args.timeoutMs,
+    body: {
       systemInstruction: { parts: [{ text: args.system }] },
       contents: [{ role: "user", parts: [{ text: args.user }] }],
       generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: args.maxTokens ?? 2048,
+        temperature: args.temperature ?? DEFAULT_TEMPERATURE,
+        maxOutputTokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
         responseMimeType: "application/json",
       },
-    }),
-  });
+    },
+  }) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  };
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new AppError("provider_error", `Gemini ${res.status}: ${body.slice(0, 200)}`);
-  }
-
-  const json = await res.json();
   const text = (json?.candidates?.[0]?.content?.parts ?? [])
-    .map((p: { text?: string }) => p.text ?? "")
+    .map((p) => p.text ?? "")
     .join("");
+
   return {
     text,
     usage: {

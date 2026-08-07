@@ -1,13 +1,24 @@
 // Model routing [AI-PROMPTS.md § Model routing, D-AI-1]:
 //   free    → Gemini Flash
 //   premium → Claude Sonnet
-//   fallback (on provider failure) → GPT-4o-mini
+//   fallback (on a retryable provider failure) → GPT-4o-mini
+//
 // Generation is JSON-only with one "valid JSON only" retry, then provider_error.
-// Model ids are read from app_config (overridable) with canon defaults.
+// Model ids are read from app_config (overridable) with canon defaults; sampling
+// comes from ai_feature_policy via the caller's reservation.
 
 import { AppConfig } from "../config.ts";
 import { AppError } from "../errors.ts";
-import { GenerationResult, Usage, GenerateArgs } from "./types.ts";
+import { DEFAULT_TIMEOUT_MS } from "./http.ts";
+import { parseJsonLoose } from "./json.ts";
+import {
+  GenerateArgs,
+  GenerateStream,
+  GenerationResult,
+  ProviderError,
+  Sampling,
+  Usage,
+} from "./types.ts";
 import { geminiGenerateJson } from "./gemini.ts";
 import { anthropicGenerateJson } from "./anthropic.ts";
 import { openaiGenerateJson } from "./openai.ts";
@@ -17,7 +28,26 @@ export type Tier = "free" | "premium";
 export interface RoutedResult {
   json: Record<string, unknown>;
   model: string;
+  provider: string;
   usage: Usage;
+}
+
+export type Generate = (a: GenerateArgs) => Promise<GenerationResult>;
+
+/** One provider the router may try, in order. */
+export interface Candidate {
+  provider: string;
+  generate: Generate;
+  /** Set once a provider gains SSE support; absent means buffered only. */
+  stream?: GenerateStream;
+  apiKey: string;
+  model: string;
+}
+
+/** True when the whole ladder can stream, so chat can promise tokens. */
+export function canStream(candidates: Candidate[]): boolean {
+  const usable = candidates.filter((c) => c.apiKey);
+  return usable.length > 0 && usable.every((c) => c.stream);
 }
 
 function premiumModelId(label: string): string {
@@ -27,92 +57,132 @@ function premiumModelId(label: string): string {
   return "claude-sonnet-4-20250514";
 }
 
-function parseJsonLoose(text: string): Record<string, unknown> | null {
-  if (!text) return null;
-  const cleaned = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(cleaned.slice(start, end + 1));
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
+export function sumUsage(a: Usage, b: Usage): Usage {
+  return {
+    input_tokens: a.input_tokens + b.input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+  };
 }
 
-type Generate = (a: GenerateArgs) => Promise<GenerationResult>;
+export interface AttemptOptions extends Sampling {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  /** Recovers usable data from a reply truncated mid-array. */
+  salvage?: (partial: string) => Record<string, unknown> | null;
+  /** Rejects a parsed-but-useless reply so the JSON retry still fires. */
+  accept?: (json: Record<string, unknown>) => boolean;
+}
 
-async function attempt(
-  gen: Generate,
+/**
+ * One provider, up to two calls: the request, then a single retry that spells
+ * out the JSON requirement. Beyond that the provider is not going to comply and
+ * a third call is just spend.
+ */
+export async function attempt(
+  candidate: Candidate,
   system: string,
   user: string,
-  apiKey: string,
-  model: string,
-  maxTokens?: number,
+  opts: AttemptOptions = {},
 ): Promise<{ json: Record<string, unknown>; usage: Usage }> {
-  const first = await gen({ system, user, apiKey, model, maxTokens });
-  const parsed = parseJsonLoose(first.text);
-  if (parsed) return { json: parsed, usage: first.usage };
+  const accept = opts.accept ?? (() => true);
+  const call = (u: string) =>
+    candidate.generate({
+      system,
+      user: u,
+      apiKey: candidate.apiKey,
+      model: candidate.model,
+      temperature: opts.temperature,
+      maxTokens: opts.maxTokens,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
 
-  // Retry once with an explicit JSON reminder [§6 edge cases].
-  const second = await gen({
-    system,
-    user: `${user}\n\nIMPORTANT: Output valid JSON only.`,
-    apiKey,
-    model,
-    maxTokens,
-  });
-  const reparsed = parseJsonLoose(second.text);
-  if (reparsed) {
-    return {
-      json: reparsed,
-      usage: {
-        input_tokens: first.usage.input_tokens + second.usage.input_tokens,
-        output_tokens: first.usage.output_tokens + second.usage.output_tokens,
-      },
-    };
-  }
-  throw new AppError("provider_error", "Model did not return valid JSON.");
+  const first = await call(user);
+  const parsed = parseJsonLoose(first.text, opts.salvage);
+  if (parsed && accept(parsed)) return { json: parsed, usage: first.usage };
+
+  const second = await call(`${user}\n\nIMPORTANT: Output valid JSON only.`);
+  const reparsed = parseJsonLoose(second.text, opts.salvage);
+  const usage = sumUsage(first.usage, second.usage);
+  if (reparsed && accept(reparsed)) return { json: reparsed, usage };
+
+  throw new ProviderError(candidate.provider, null, true, "Model did not return valid JSON.");
 }
 
-export async function generateJson(
+/**
+ * Walks the candidates in order, moving on only when a failure is worth
+ * retrying elsewhere. A missing key or a rejected prompt fails the same way on
+ * every provider, so those stop the ladder immediately instead of spending a
+ * second provider's tokens to reach the same answer.
+ */
+export async function runLadder(
+  candidates: Candidate[],
+  system: string,
+  user: string,
+  opts: AttemptOptions = {},
+): Promise<RoutedResult> {
+  const usable = candidates.filter((c) => c.apiKey);
+  if (usable.length === 0) {
+    throw new AppError("provider_error", "No AI provider is configured.");
+  }
+
+  let last: unknown;
+  for (const candidate of usable) {
+    try {
+      const out = await attempt(candidate, system, user, opts);
+      return {
+        json: out.json,
+        model: candidate.model,
+        provider: candidate.provider,
+        usage: out.usage,
+      };
+    } catch (err) {
+      last = err;
+      const retryable = err instanceof ProviderError ? err.retryable : false;
+      if (!retryable) break;
+      console.error(`provider ${candidate.provider} failed, trying next:`, (err as Error).message);
+    }
+  }
+
+  throw new AppError(
+    "provider_error",
+    last instanceof Error ? last.message : "All AI providers failed.",
+  );
+}
+
+/** Tier-ordered candidates: the tier's primary first, then the shared fallback. */
+export function candidatesForTier(config: AppConfig, tier: Tier): Candidate[] {
+  const primary: Candidate = tier === "premium"
+    ? {
+      provider: "anthropic",
+      generate: anthropicGenerateJson,
+      apiKey: Deno.env.get("ANTHROPIC_API_KEY") ?? "",
+      model: premiumModelId(config.str("ai_model_premium", "claude-sonnet")),
+    }
+    : {
+      provider: "gemini",
+      generate: geminiGenerateJson,
+      apiKey: Deno.env.get("GEMINI_API_KEY") ?? "",
+      model: config.str("ai_model_free", "gemini-1.5-flash"),
+    };
+
+  return [primary, {
+    provider: "openai",
+    generate: openaiGenerateJson,
+    apiKey: Deno.env.get("OPENAI_API_KEY") ?? "",
+    model: config.str("ai_model_fallback", "gpt-4o-mini"),
+  }];
+}
+
+export function generateJson(
   config: AppConfig,
   tier: Tier,
   system: string,
   user: string,
-  maxTokens?: number,
+  opts: AttemptOptions = {},
 ): Promise<RoutedResult> {
-  const fallbackModel = config.str("ai_model_fallback", "gpt-4o-mini");
-  const openaiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
-
-  let primaryGen: Generate;
-  let primaryKey: string;
-  let primaryModel: string;
-
-  if (tier === "premium") {
-    primaryGen = anthropicGenerateJson;
-    primaryKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
-    primaryModel = premiumModelId(config.str("ai_model_premium", "claude-sonnet"));
-  } else {
-    primaryGen = geminiGenerateJson;
-    primaryKey = Deno.env.get("GEMINI_API_KEY") ?? "";
-    primaryModel = config.str("ai_model_free", "gemini-1.5-flash");
-  }
-
-  try {
-    if (!primaryKey) throw new AppError("provider_error", "Primary provider key missing.");
-    const out = await attempt(primaryGen, system, user, primaryKey, primaryModel, maxTokens);
-    return { json: out.json, model: primaryModel, usage: out.usage };
-  } catch (err) {
-    // Fall back to GPT-4o-mini once on any primary failure.
-    if (!openaiKey) throw err instanceof AppError ? err : new AppError("provider_error");
-    const out = await attempt(openaiGenerateJson, system, user, openaiKey, fallbackModel, maxTokens);
-    return { json: out.json, model: fallbackModel, usage: out.usage };
-  }
+  return runLadder(candidatesForTier(config, tier), system, user, {
+    timeoutMs: config.int("ai_provider_timeout_ms", DEFAULT_TIMEOUT_MS),
+    ...opts,
+  });
 }
