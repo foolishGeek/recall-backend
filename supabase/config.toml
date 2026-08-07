@@ -434,6 +434,11 @@ verify_jwt = false
 [functions.onboarding-emails]
 verify_jwt = false
 
+# embed-drain is invoked by pg_cron + the node content-hash trigger (no user JWT);
+# it authenticates with the X-Cron-Secret header inside the handler.
+[functions.embed-drain]
+verify_jwt = false
+
 [edge_runtime]
 enabled = true
 # Supported request policies: `oneshot`, `per_worker`.
