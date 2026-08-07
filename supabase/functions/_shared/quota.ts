@@ -10,6 +10,7 @@
 
 import { adminClient } from "./supabase.ts";
 import { AppError, ErrorCode } from "./errors.ts";
+import { logFailedInteraction } from "./interactions.ts";
 
 export type Tier = "free" | "premium";
 
@@ -126,6 +127,7 @@ async function settle(
 }
 
 async function run<T>(
+  input: MeterInput,
   work: (r: Reservation) => Promise<MeteredOutcome<T>>,
   decision: GateDecision,
 ): Promise<T> {
@@ -152,12 +154,22 @@ async function run<T>(
     }
     return out.result;
   } catch (err) {
+    const errorCode = err instanceof AppError ? err.code : "provider_error";
     if (requestId) {
       await settle(requestId, "failed", {
         latencyMs: Date.now() - startedAt,
-        errorCode: err instanceof AppError ? err.code : "provider_error",
+        errorCode,
       });
     }
+    // Capture failed generations so rejected answers still enter the spine.
+    await logFailedInteraction({
+      userId: input.userId,
+      feature: input.feature,
+      requestId,
+      conversationId: input.conversationId ?? null,
+      errorCode,
+      latencyMs: Date.now() - startedAt,
+    });
     throw err;
   }
 }
@@ -173,7 +185,7 @@ export async function withMeteredRequest<T>(
   const decision = await reserve(input);
   if (decision.replay) return decision.response as T;
   assertAllowed(decision);
-  return run(work, decision);
+  return run(input, work, decision);
 }
 
 /**
@@ -188,5 +200,5 @@ export async function withOptionalMeteredRequest<T>(
   const decision = await reserve(input);
   if (decision.replay) return decision.response as T;
   if (!decision.allowed) return null;
-  return run(work, decision);
+  return run(input, work, decision);
 }
