@@ -1,71 +1,13 @@
-// Feature: embed [D-EF-4]. No LLM. Chunk extracted_text, embed with
-// text-embedding-3-small, replace node_chunks. Counts as 1 AI request; skipped
-// silently when there's no text or the gate blocks the owner [D-AI-3].
+// Feature: embed [D-EF-4]. No LLM. The work lives in _shared/embed_node.ts
+// because the embed-drain cron worker runs the same thing; this is only the
+// router's entry point into it.
 
-import { adminClient } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
-import { chunkText } from "../../_shared/chunk.ts";
-import { stripHtml } from "../../_shared/text.ts";
-import { embedTexts } from "../../_shared/providers/embed.ts";
-import { withOptionalMeteredRequest } from "../../_shared/quota.ts";
+import { embedNode, EmbedResult } from "../../_shared/embed_node.ts";
 import { requireUuid } from "../../_shared/validate.ts";
 
-export interface EmbedResult {
-  chunks_upserted: number;
-  skipped: boolean;
-}
+export type { EmbedResult };
 
-export async function embed(payload: Record<string, unknown>, config: AppConfig): Promise<EmbedResult> {
-  const nodeId = requireUuid(payload.node_id, "node_id");
-  const db = adminClient();
-
-  const { data: node } = await db
-    .from("nodes")
-    .select("id, extracted_text, buckets!inner(user_id, deleted_at)")
-    .eq("id", nodeId)
-    .is("deleted_at", null)
-    .maybeSingle();
-
-  if (!node) return { chunks_upserted: 0, skipped: true };
-
-  const owner = (node as { buckets?: { user_id?: string } }).buckets?.user_id;
-  const text = stripHtml((node as { extracted_text?: string }).extracted_text);
-  if (!owner || !text) return { chunks_upserted: 0, skipped: true };
-
-  const chunks = chunkText(
-    text,
-    config.int("ai_chunk_size_tokens", 500),
-    config.int("ai_chunk_overlap_tokens", 50),
-  );
-  if (chunks.length === 0) return { chunks_upserted: 0, skipped: true };
-
-  // Counts as 1 AI request against the owner; a blocked owner is skipped
-  // silently since this is background work they never asked for [D-AI-3].
-  // A provider or write failure releases the hold instead of charging them.
-  const result = await withOptionalMeteredRequest({ userId: owner, feature: "embed" }, async () => {
-      const { embeddings, inputTokens, model, provider } = await embedTexts(config, chunks);
-
-    // Replace old chunks atomically enough for our needs (delete then insert).
-    await db.from("node_chunks").delete().eq("node_id", nodeId);
-
-    const rows = chunks.map((content, i) => ({
-      node_id: nodeId,
-      chunk_index: i,
-      content,
-      // pgvector expects the bracketed text form; stringify the float array.
-      embedding: JSON.stringify(embeddings[i] ?? []),
-    }));
-
-    const { error: insErr } = await db.from("node_chunks").insert(rows);
-    if (insErr) throw insErr;
-
-      return {
-        result: { chunks_upserted: rows.length, skipped: false },
-        model,
-        provider,
-        inputTokens,
-      };
-  });
-
-  return result ?? { chunks_upserted: 0, skipped: true };
+export function embed(payload: Record<string, unknown>, config: AppConfig): Promise<EmbedResult> {
+  return embedNode(requireUuid(payload.node_id, "node_id"), config);
 }
