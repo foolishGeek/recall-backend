@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS ai_embed_queue (
   id              bigserial PRIMARY KEY,
   source_kind     text NOT NULL DEFAULT 'node',
   source_id       uuid NOT NULL,
+  -- Why this is queued, which decides whether the owner pays for it.
+  -- 'content_change' is the user changing their note, and costs an AI request
+  -- per [D-AI-3]. 'reindex' is us rebuilding vectors for content they already
+  -- paid to embed once -- a better chunker, a new model -- and must be free, or
+  -- a migration would quietly spend everyone's monthly allowance.
+  reason          text NOT NULL DEFAULT 'content_change'
+                    CHECK (reason IN ('content_change', 'reindex')),
   status          ai_embed_status NOT NULL DEFAULT 'pending',
   attempts        integer NOT NULL DEFAULT 0,
   last_error      text,
@@ -87,17 +94,31 @@ CREATE TRIGGER set_ai_embed_queue_updated_at
 
 -- Marks a source as needing (re-)embedding. Resets attempts so a source that
 -- previously exhausted its retries gets a fresh start when its content changes.
-CREATE OR REPLACE FUNCTION ai_embed_enqueue(p_source_id uuid, p_source_kind text DEFAULT 'node')
-RETURNS bigint
+CREATE OR REPLACE FUNCTION ai_embed_enqueue(
+  p_source_id uuid,
+  p_source_kind text DEFAULT 'node',
+  p_reason text DEFAULT 'content_change'
+) RETURNS bigint
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_id bigint;
 BEGIN
-  INSERT INTO ai_embed_queue (source_kind, source_id, status, attempts,
+  INSERT INTO ai_embed_queue (source_kind, source_id, reason, status, attempts,
                               last_error, next_attempt_at, claimed_at)
-  VALUES (p_source_kind, p_source_id, 'pending', 0, NULL, now(), NULL)
+  VALUES (p_source_kind, p_source_id, p_reason, 'pending', 0, NULL, now(), NULL)
   ON CONFLICT (source_kind, source_id) DO UPDATE
-    SET status = 'pending', attempts = 0, last_error = NULL,
+    SET reason = CASE
+          -- A real edit always wins: the user changed the note, so the work is
+          -- theirs even if a reindex was already waiting.
+          WHEN p_reason = 'content_change' THEN p_reason
+          -- A reindex must not erase an edit that has not been embedded yet, or
+          -- the user's change would silently become our unbilled work.
+          WHEN ai_embed_queue.status IN ('pending', 'processing')
+            THEN ai_embed_queue.reason
+          -- Otherwise the previous reason is settled history.
+          ELSE p_reason
+        END,
+        status = 'pending', attempts = 0, last_error = NULL,
         next_attempt_at = now(), claimed_at = NULL
   RETURNING id INTO v_id;
   RETURN v_id;
@@ -110,7 +131,7 @@ $$;
 -- A 'processing' row older than the reclaim window is picked up again: that is a
 -- worker that died mid-flight, and the alternative is a note stuck forever.
 CREATE OR REPLACE FUNCTION ai_embed_claim(p_limit integer DEFAULT 25)
-RETURNS TABLE (id bigint, source_kind text, source_id uuid, attempts integer)
+RETURNS TABLE (id bigint, source_kind text, source_id uuid, reason text, attempts integer)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   reclaim_after interval := make_interval(
@@ -130,7 +151,7 @@ BEGIN
   SET status = 'processing', claimed_at = now()
   FROM due
   WHERE q.id = due.id
-  RETURNING q.id, q.source_kind, q.source_id, q.attempts;
+  RETURNING q.id, q.source_kind, q.source_id, q.reason, q.attempts;
 END;
 $$;
 
@@ -171,7 +192,7 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION ai_embed_enqueue(uuid, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION ai_embed_enqueue(uuid, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION ai_embed_claim(integer) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION ai_embed_complete(bigint, boolean, text) FROM PUBLIC, anon, authenticated;
 
@@ -385,8 +406,13 @@ ON CONFLICT (key) DO NOTHING;
 -- with collapsed whitespace and no title context, so they are worse than what
 -- the same text produces now. Queued rather than done inline so this migration
 -- stays fast and the work is rate-limited by the drainer.
-INSERT INTO ai_embed_queue (source_kind, source_id, status)
-SELECT 'node', n.id, 'pending'
+--
+-- 'reindex' is what keeps this free. These notes were already embedded once at
+-- the user's expense, and re-chunking them is our improvement, not their
+-- request; billing it would spend a free user's whole monthly allowance the
+-- moment this deploys.
+INSERT INTO ai_embed_queue (source_kind, source_id, reason, status)
+SELECT 'node', n.id, 'reindex', 'pending'
 FROM nodes n
 WHERE n.deleted_at IS NULL
   AND COALESCE(n.extracted_text, '') <> ''

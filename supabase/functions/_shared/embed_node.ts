@@ -42,7 +42,20 @@ function contextHeader(
   return parts.length ? `${parts.join(" › ")}\n\n` : "";
 }
 
-export async function embedNode(nodeId: string, config: AppConfig): Promise<EmbedResult> {
+export interface EmbedOptions {
+  /**
+   * False for a reindex — rebuilding vectors for content the user already paid
+   * to embed. Charging again for our own improvement would spend a free user's
+   * whole monthly allowance the moment a better chunker or model ships.
+   */
+  meter?: boolean;
+}
+
+export async function embedNode(
+  nodeId: string,
+  config: AppConfig,
+  options: EmbedOptions = {},
+): Promise<EmbedResult> {
   const db = adminClient();
 
   const { data, error } = await db
@@ -85,10 +98,7 @@ export async function embedNode(nodeId: string, config: AppConfig): Promise<Embe
   });
   if (chunks.length === 0) return { chunks_upserted: 0, skipped: true };
 
-  // Counts as 1 AI request against the owner; a blocked owner is skipped
-  // silently since this is background work they never asked for [D-AI-3].
-  // A provider or write failure releases the hold instead of charging them.
-  const result = await withOptionalMeteredRequest({ userId: owner, feature: "embed" }, async () => {
+  const work = async () => {
     const inputs = chunks.map((chunk) => `${headerOf(chunk)}${chunk.content}`);
     const { embeddings, inputTokens, model: usedModel, provider } = await embedTexts(config, inputs);
 
@@ -106,8 +116,15 @@ export async function embedNode(nodeId: string, config: AppConfig): Promise<Embe
       provider,
       inputTokens,
     };
-  });
+  };
 
+  // A reindex is our own work on content already paid for, so it runs unmetered.
+  if (options.meter === false) return (await work()).result;
+
+  // Otherwise it counts as 1 AI request against the owner, and a blocked owner is
+  // skipped silently since this is background work they never asked for [D-AI-3].
+  // A provider or write failure releases the hold instead of charging them.
+  const result = await withOptionalMeteredRequest({ userId: owner, feature: "embed" }, work);
   return result ?? { chunks_upserted: 0, skipped: true };
 }
 

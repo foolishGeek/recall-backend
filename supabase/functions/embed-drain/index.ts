@@ -21,6 +21,7 @@ interface QueueItem {
   id: number;
   source_kind: string;
   source_id: string;
+  reason: "content_change" | "reindex";
   attempts: number;
 }
 
@@ -68,7 +69,11 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      const result = await embedNode(item.source_id, config);
+      // A reindex rebuilds vectors for content the user already paid to embed,
+      // so it must not be charged again.
+      const result = await embedNode(item.source_id, config, {
+        meter: item.reason !== "reindex",
+      });
       await complete(item.id, true);
       if (result.skipped) skipped++;
       else embedded++;

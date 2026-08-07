@@ -359,6 +359,63 @@ END $$;
 
 -- ---------------------------------------------------------------------------
 \echo ''
+\echo '# a reindex is marked so nobody gets billed for our own improvement'
+DO $$
+DECLARE
+  bid uuid := pgtest_bucket('embed-reason@test.local');
+  nid uuid;
+BEGIN
+  PERFORM pgtest_reset_queue();
+
+  -- A user editing their note is their request, and is charged for.
+  INSERT INTO nodes (bucket_id, title, extracted_text, content_hash)
+  VALUES (bid, 'Note', 'text', 'h1') RETURNING id INTO nid;
+  PERFORM pgtest_eq((SELECT reason FROM ai_embed_queue WHERE source_id = nid),
+                    'content_change', 'a save is billed as a content change');
+
+  -- A reindex must not erase an edit that has not been embedded yet, or the
+  -- user's change would quietly turn into our unbilled work.
+  PERFORM ai_embed_enqueue(nid, 'node', 'reindex');
+  PERFORM pgtest_eq((SELECT reason FROM ai_embed_queue WHERE source_id = nid),
+                    'content_change', 'a reindex cannot displace a pending edit');
+
+  -- Once that edit is embedded, re-chunking the same content is ours to pay for.
+  PERFORM ai_embed_complete((SELECT id FROM ai_embed_queue WHERE source_id = nid), true);
+  PERFORM ai_embed_enqueue(nid, 'node', 'reindex');
+  PERFORM pgtest_eq((SELECT reason FROM ai_embed_queue WHERE source_id = nid),
+                    'reindex', 'rebuilding settled content is a reindex');
+  PERFORM pgtest_eq((SELECT reason FROM ai_embed_claim(10) WHERE source_id = nid),
+                    'reindex', 'and the worker is told which it is');
+
+  -- If the user edits while a reindex is queued, it becomes their request again.
+  PERFORM ai_embed_complete((SELECT id FROM ai_embed_queue WHERE source_id = nid), true);
+  PERFORM ai_embed_enqueue(nid, 'node', 'reindex');
+  UPDATE nodes SET content_hash = 'h2' WHERE id = nid;
+  PERFORM pgtest_eq((SELECT reason FROM ai_embed_queue WHERE source_id = nid),
+                    'content_change', 'a real edit supersedes a queued reindex');
+
+  PERFORM pgtest_eq((SELECT count(*)::integer FROM ai_embed_queue
+                     WHERE reason NOT IN ('content_change', 'reindex')), 0,
+                    'no other reason can be stored');
+END $$;
+
+\echo '# the backfill queued existing notes as unbilled reindex work'
+DO $$
+BEGIN
+  -- The migration ran against an empty nodes table here, so assert the shape of
+  -- the rule rather than the row count: a reason must be explicit, and the
+  -- column default must be the billed one so a caller cannot get free work by
+  -- omitting it.
+  PERFORM pgtest_eq(
+    (SELECT column_default FROM information_schema.columns
+     WHERE table_name = 'ai_embed_queue' AND column_name = 'reason'),
+    '''content_change''::text',
+    'the default is the billed reason, so free work must be asked for');
+END $$;
+
+
+-- ---------------------------------------------------------------------------
+\echo ''
 \echo '# the queue is reachable only through the definer functions'
 DO $$
 BEGIN
@@ -370,6 +427,9 @@ BEGIN
   PERFORM pgtest_eq(has_function_privilege('authenticated',
                     'ai_embed_claim(integer)', 'EXECUTE'), false,
                     'app users cannot claim work');
+  PERFORM pgtest_eq(has_function_privilege('authenticated',
+                    'ai_embed_enqueue(uuid, text, text)', 'EXECUTE'), false,
+                    'app users cannot queue free embedding for themselves');
   PERFORM pgtest_eq(has_function_privilege('authenticated',
                     'node_chunks_replace(uuid, jsonb)', 'EXECUTE'), false,
                     'app users cannot rewrite chunks');
