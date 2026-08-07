@@ -6,8 +6,8 @@ import { adminClient } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { chunkText } from "../../_shared/chunk.ts";
 import { stripHtml } from "../../_shared/text.ts";
-import { openaiEmbed } from "../../_shared/providers/openai.ts";
-import { gateConsume, logUsage } from "../../_shared/quota.ts";
+import { embedTexts } from "../../_shared/providers/embed.ts";
+import { withOptionalMeteredRequest } from "../../_shared/quota.ts";
 import { requireUuid } from "../../_shared/validate.ts";
 
 export interface EmbedResult {
@@ -32,10 +32,6 @@ export async function embed(payload: Record<string, unknown>, config: AppConfig)
   const text = stripHtml((node as { extracted_text?: string }).extracted_text);
   if (!owner || !text) return { chunks_upserted: 0, skipped: true };
 
-  // Counts as 1 AI request; a blocked owner means we silently skip.
-  const decision = await gateConsume(owner, "embed");
-  if (!decision.allowed) return { chunks_upserted: 0, skipped: true };
-
   const chunks = chunkText(
     text,
     config.int("ai_chunk_size_tokens", 500),
@@ -43,24 +39,33 @@ export async function embed(payload: Record<string, unknown>, config: AppConfig)
   );
   if (chunks.length === 0) return { chunks_upserted: 0, skipped: true };
 
-  const embedModel = config.str("ai_model_embed", "text-embedding-3-small");
-  const openaiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
-  const { embeddings, inputTokens } = await openaiEmbed(openaiKey, embedModel, chunks);
+  // Counts as 1 AI request against the owner; a blocked owner is skipped
+  // silently since this is background work they never asked for [D-AI-3].
+  // A provider or write failure releases the hold instead of charging them.
+  const result = await withOptionalMeteredRequest({ userId: owner, feature: "embed" }, async () => {
+      const { embeddings, inputTokens, model, provider } = await embedTexts(config, chunks);
 
-  // Replace old chunks atomically enough for our needs (delete then insert).
-  await db.from("node_chunks").delete().eq("node_id", nodeId);
+    // Replace old chunks atomically enough for our needs (delete then insert).
+    await db.from("node_chunks").delete().eq("node_id", nodeId);
 
-  const rows = chunks.map((content, i) => ({
-    node_id: nodeId,
-    chunk_index: i,
-    content,
-    // pgvector expects the bracketed text form; stringify the float array.
-    embedding: JSON.stringify(embeddings[i] ?? []),
-  }));
+    const rows = chunks.map((content, i) => ({
+      node_id: nodeId,
+      chunk_index: i,
+      content,
+      // pgvector expects the bracketed text form; stringify the float array.
+      embedding: JSON.stringify(embeddings[i] ?? []),
+    }));
 
-  const { error: insErr } = await db.from("node_chunks").insert(rows);
-  if (insErr) throw insErr;
+    const { error: insErr } = await db.from("node_chunks").insert(rows);
+    if (insErr) throw insErr;
 
-  await logUsage(owner, "embed", inputTokens, 0, embedModel);
-  return { chunks_upserted: rows.length, skipped: false };
+      return {
+        result: { chunks_upserted: rows.length, skipped: false },
+        model,
+        provider,
+        inputTokens,
+      };
+  });
+
+  return result ?? { chunks_upserted: 0, skipped: true };
 }

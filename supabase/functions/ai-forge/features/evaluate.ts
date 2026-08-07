@@ -16,7 +16,7 @@ import {
   type LinkSuggestion,
 } from "../../_shared/note_links.ts";
 import { generateJson, Tier } from "../../_shared/providers/route.ts";
-import { gateConsume, assertAllowed, logUsage } from "../../_shared/quota.ts";
+import { withMeteredRequest } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
 import { userDirectives } from "../../_shared/user_prefs.ts";
 import { requireUuid } from "../../_shared/validate.ts";
@@ -109,10 +109,6 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
     .filter(Boolean)
     .join(", ");
 
-  const decision = await gateConsume(userId, "evaluate");
-  assertAllowed(decision);
-  const tier = (decision.tier ?? "free") as Tier;
-
   const noteUrls = collectNoteUrls(n.markdown, n.url);
   const noteUrlsBlock = noteUrls.length > 0
     ? noteUrls.map((u) => `- ${u}`).join("\n")
@@ -131,68 +127,80 @@ ${noteUrlsBlock}
 CONTENT:
 ${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
 
-  const system = EVALUATE_SYSTEM + (await userDirectives(userId));
-  const t0 = Date.now();
-  const gen = await generateJson(config, tier, system, userPrompt);
-  const latencyMs = Date.now() - t0;
+  // Cache hits and corpus assembly above are free; only the model call is
+  // metered, and the overview is released back if anything below throws.
+  return withMeteredRequest({ userId, feature: "evaluate" }, async (reservation) => {
+    const tier = reservation.tier as Tier;
+    const system = EVALUATE_SYSTEM + (await userDirectives(userId));
+    const t0 = Date.now();
+    const gen = await generateJson(config, tier, system, userPrompt, {
+      temperature: reservation.temperature,
+      maxTokens: reservation.maxTokens,
+    });
+    const latencyMs = Date.now() - t0;
 
-  const quality = clampInt(gen.json.quality_score, 0, 100, 50);
-  const comfort = clampInt(gen.json.suggested_comfort, 0, 100, n.comfort ?? 50);
-  const difficulty = clampInt(gen.json.suggested_difficulty, 1, 5, n.difficulty ?? 3);
-  const feedback = typeof gen.json.feedback === "string" ? gen.json.feedback : "";
-  const rawMarkdown = typeof gen.json.suggested_markdown === "string"
-    ? truncate(gen.json.suggested_markdown, config.int("ai_node_text_max_chars", 8000))
-    : null;
-  const suggestedMarkdown = mergeStandaloneUrls(n.markdown, rawMarkdown);
+    const quality = clampInt(gen.json.quality_score, 0, 100, 50);
+    const comfort = clampInt(gen.json.suggested_comfort, 0, 100, n.comfort ?? 50);
+    const difficulty = clampInt(gen.json.suggested_difficulty, 1, 5, n.difficulty ?? 3);
+    const feedback = typeof gen.json.feedback === "string" ? gen.json.feedback : "";
+    const rawMarkdown = typeof gen.json.suggested_markdown === "string"
+      ? truncate(gen.json.suggested_markdown, config.int("ai_node_text_max_chars", 8000))
+      : null;
+    const suggestedMarkdown = mergeStandaloneUrls(n.markdown, rawMarkdown);
 
-  const linkSuggestions: LinkSuggestion[] = validateLinkSuggestions(
-    gen.json.link_suggestions,
-    noteUrls,
-    2,
-  );
+    const linkSuggestions: LinkSuggestion[] = validateLinkSuggestions(
+      gen.json.link_suggestions,
+      noteUrls,
+      2,
+    );
 
-  const { error: insErr } = await db.from("node_ai_evaluations").insert({
-    node_id: nodeId,
-    quality_score: quality,
-    suggested_comfort: comfort,
-    suggested_difficulty: difficulty,
-    feedback,
-    suggested_markdown: suggestedMarkdown,
-    link_suggestions: linkSuggestions,
-    model: gen.model,
-    content_hash: n.content_hash,
-  });
-  if (insErr) throw insErr;
-
-  await logUsage(userId, "evaluate", gen.usage.input_tokens, gen.usage.output_tokens, gen.model);
-  const interactionId = await logInteraction({
-    userId,
-    feature: "evaluate",
-    scope: { node_id: nodeId },
-    retrievedNodeIds: [nodeId],
-    hadNotes: true,
-    blend: "notes_only",
-    model: gen.model,
-    latencyMs,
-    inputTokens: gen.usage.input_tokens,
-    outputTokens: gen.usage.output_tokens,
-    payload: {
-      note: text,
-      suggested_markdown: suggestedMarkdown,
+    const { error: insErr } = await db.from("node_ai_evaluations").insert({
+      node_id: nodeId,
+      quality_score: quality,
+      suggested_comfort: comfort,
+      suggested_difficulty: difficulty,
       feedback,
+      suggested_markdown: suggestedMarkdown,
       link_suggestions: linkSuggestions,
-    },
-    contentHash: n.content_hash ?? null,
+      model: gen.model,
+      content_hash: n.content_hash,
+    });
+    if (insErr) throw insErr;
+
+    const interactionId = await logInteraction({
+      userId,
+      feature: "evaluate",
+      scope: { node_id: nodeId },
+      retrievedNodeIds: [nodeId],
+      hadNotes: true,
+      blend: "notes_only",
+      model: gen.model,
+      latencyMs,
+      inputTokens: gen.usage.input_tokens,
+      outputTokens: gen.usage.output_tokens,
+      payload: {
+        note: text,
+        suggested_markdown: suggestedMarkdown,
+        feedback,
+        link_suggestions: linkSuggestions,
+      },
+      contentHash: n.content_hash ?? null,
+    });
+    return {
+      result: {
+        quality_score: quality,
+        suggested_comfort: comfort,
+        suggested_difficulty: difficulty,
+        feedback,
+        suggested_markdown: suggestedMarkdown,
+        link_suggestions: linkSuggestions,
+        model: gen.model,
+        cached: false,
+        interaction_id: interactionId,
+      },
+      model: gen.model,
+      inputTokens: gen.usage.input_tokens,
+      outputTokens: gen.usage.output_tokens,
+    };
   });
-  return {
-    quality_score: quality,
-    suggested_comfort: comfort,
-    suggested_difficulty: difficulty,
-    feedback,
-    suggested_markdown: suggestedMarkdown,
-    link_suggestions: linkSuggestions,
-    model: gen.model,
-    cached: false,
-    interaction_id: interactionId,
-  };
 }

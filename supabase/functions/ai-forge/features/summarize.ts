@@ -9,9 +9,9 @@ import { AppError } from "../../_shared/errors.ts";
 import { truncate } from "../../_shared/text.ts";
 import { formatContext, RetrievedChunk } from "../../_shared/context.ts";
 import { nodeCorpusText, NodeRow } from "../../_shared/node_corpus.ts";
-import { openaiEmbed } from "../../_shared/providers/openai.ts";
+import { embedQuery } from "../../_shared/providers/embed.ts";
 import { generateJson, Tier } from "../../_shared/providers/route.ts";
-import { gateConsume, assertAllowed, logUsage } from "../../_shared/quota.ts";
+import { withMeteredRequest } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
 import { userDirectives } from "../../_shared/user_prefs.ts";
 import { requireUuid } from "../../_shared/validate.ts";
@@ -74,19 +74,17 @@ export async function summarize(payload: Record<string, unknown>, userId: string
         .join("\n---\n");
     } else {
       // Large bucket: retrieve key chunks via RAG over a themes query.
-      const embedModel = config.str("ai_model_embed", "text-embedding-3-small");
-      const openaiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
-      const { embeddings } = await openaiEmbed(openaiKey, embedModel, [
-        "key themes and facts in this bucket",
-      ]);
-      const { data: matches } = await db.rpc("match_chunks", {
-        query_embedding: JSON.stringify(embeddings[0] ?? []),
-        match_user_id: userId,
-        match_count: maxNodes * 2,
-        match_threshold: 0.0,
-        filter_bucket_ids: [bucketId],
-        filter_node_ids: null,
-      });
+      const qEmbedding = await embedQuery(config, "key themes and facts in this bucket");
+      const { data: matches } = qEmbedding
+        ? await db.rpc("match_chunks", {
+          query_embedding: JSON.stringify(qEmbedding),
+          match_user_id: userId,
+          match_count: maxNodes * 2,
+          match_threshold: 0.0,
+          filter_bucket_ids: [bucketId],
+          filter_node_ids: null,
+        })
+        : { data: null };
       const rows = (matches ?? []) as { node_id: string; content: string; similarity: number }[];
       const titles = new Map<string, string>(
         withText.map((x: { node: NodeRow }) => [x.node.id, x.node.title ?? ""]),
@@ -112,31 +110,39 @@ export async function summarize(payload: Record<string, unknown>, userId: string
     }
   }
 
-  const decision = await gateConsume(userId, "summarize");
-  assertAllowed(decision);
-  const tier = (decision.tier ?? "free") as Tier;
+  // Metered from here: the hold is released if the provider throws, so a failed
+  // summary never spends one of the user's monthly requests.
+  return withMeteredRequest({ userId, feature: "summarize" }, async (reservation) => {
+    const tier = reservation.tier as Tier;
+    const userPrompt = `CONTEXT:\n${contextText}\n\nSCOPE: ${scope} — ${scopeName}`;
+    const system = SUMMARIZE_SYSTEM + (await userDirectives(userId));
+    const t0 = Date.now();
+    const gen = await generateJson(config, tier, system, userPrompt, {
+      temperature: reservation.temperature,
+      maxTokens: reservation.maxTokens,
+    });
+    const latencyMs = Date.now() - t0;
 
-  const userPrompt = `CONTEXT:\n${contextText}\n\nSCOPE: ${scope} — ${scopeName}`;
-  const system = SUMMARIZE_SYSTEM + (await userDirectives(userId));
-  const t0 = Date.now();
-  const gen = await generateJson(config, tier, system, userPrompt);
-  const latencyMs = Date.now() - t0;
+    const summary = Array.isArray(gen.json.summary) ? (gen.json.summary as string[]).slice(0, 7) : [];
+    const keyThemes = Array.isArray(gen.json.key_themes) ? (gen.json.key_themes as string[]).slice(0, 3) : [];
 
-  const summary = Array.isArray(gen.json.summary) ? (gen.json.summary as string[]).slice(0, 7) : [];
-  const keyThemes = Array.isArray(gen.json.key_themes) ? (gen.json.key_themes as string[]).slice(0, 3) : [];
-
-  await logUsage(userId, "summarize", gen.usage.input_tokens, gen.usage.output_tokens, gen.model);
-  await logInteraction({
-    userId,
-    feature: "summarize",
-    scope: { scope, node_id: payload.node_id ?? null, bucket_id: payload.bucket_id ?? null },
-    hadNotes: true,
-    blend: "notes_only",
-    model: gen.model,
-    latencyMs,
-    inputTokens: gen.usage.input_tokens,
-    outputTokens: gen.usage.output_tokens,
-    payload: { context: contextText, summary, key_themes: keyThemes },
+    await logInteraction({
+      userId,
+      feature: "summarize",
+      scope: { scope, node_id: payload.node_id ?? null, bucket_id: payload.bucket_id ?? null },
+      hadNotes: true,
+      blend: "notes_only",
+      model: gen.model,
+      latencyMs,
+      inputTokens: gen.usage.input_tokens,
+      outputTokens: gen.usage.output_tokens,
+      payload: { context: contextText, summary, key_themes: keyThemes },
+    });
+    return {
+      result: { summary, key_themes: keyThemes, model: gen.model, usage: gen.usage },
+      model: gen.model,
+      inputTokens: gen.usage.input_tokens,
+      outputTokens: gen.usage.output_tokens,
+    };
   });
-  return { summary, key_themes: keyThemes, model: gen.model, usage: gen.usage };
 }
