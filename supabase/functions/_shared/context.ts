@@ -18,6 +18,9 @@ export interface RetrievedChunk {
   vector_score?: number;
   keyword_score?: number;
   rerank_score?: number;
+  /** "node" or "asset" — an attachment can be searched on its own. */
+  source_kind?: string;
+  source_id?: string | null;
 }
 
 export interface FormattedContext {

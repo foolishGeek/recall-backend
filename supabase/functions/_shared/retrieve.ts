@@ -3,6 +3,10 @@
 // Pipeline: embed query → hybrid match (wide) → rerank seam → formatContext.
 // On a miss (or when the embedder is down) fall back to a bounded corpus
 // sample instead of dumping forty whole notes into the prompt.
+//
+// Scope-agnostic on purpose: buckets, specific notes, or specific attachments
+// are all just filters passed to match_chunks_hybrid_v2, so a feature handler
+// never has to know which kind it got.
 
 import { SupabaseClient } from "./supabase.ts";
 import { AppConfig } from "./config.ts";
@@ -25,6 +29,10 @@ export interface RetrieveRequest {
   query: string;
   bucketIds: string[] | null;
   nodeIds: string[] | null;
+  /** Restrict to specific attachments (chunks with source_kind = 'asset'). */
+  assetIds?: string[] | null;
+  /** Restrict to a subset of source kinds, e.g. ["asset"] for "my PDFs only". */
+  sourceKinds?: string[] | null;
   /** Override the formatted context budget. */
   maxChars?: number;
   /** Override top_k after rerank. */
@@ -58,7 +66,15 @@ export async function retrieve(
   const threshold = req.threshold ??
     config.num(THRESHOLD_KEYS[req.feature], config.num("ai_rag_similarity_threshold", 0.55));
 
-  if (!req.bucketIds?.length && !req.nodeIds?.length) {
+  const assetIds = req.assetIds?.length ? req.assetIds : null;
+  // Asset-scoped requests only make sense against asset chunks.
+  const sourceKinds = req.sourceKinds?.length
+    ? req.sourceKinds
+    : assetIds
+    ? ["asset"]
+    : null;
+
+  if (!req.bucketIds?.length && !req.nodeIds?.length && !assetIds) {
     return empty("none");
   }
 
@@ -67,7 +83,7 @@ export async function retrieve(
   let mode: RetrievalMode = "none";
 
   if (qEmbedding || req.query.trim()) {
-    const { data, error } = await db.rpc("match_chunks_hybrid", {
+    const { data, error } = await db.rpc("match_chunks_hybrid_v2", {
       query_embedding: qEmbedding ? JSON.stringify(qEmbedding) : null,
       query_text: req.query,
       match_user_id: req.userId,
@@ -75,6 +91,9 @@ export async function retrieve(
       match_threshold: threshold,
       filter_bucket_ids: req.bucketIds,
       filter_node_ids: req.nodeIds,
+      filter_source_kinds: sourceKinds,
+      filter_asset_ids: assetIds,
+      embed_model: config.str("ai_model_embed", "text-embedding-3-small"),
       vector_candidate_count: retrieveK * 2,
       keyword_candidate_count: retrieveK * 2,
     });
@@ -87,6 +106,8 @@ export async function retrieve(
       similarity: number;
       vector_score: number;
       keyword_score: number;
+      source_kind: string;
+      source_id: string | null;
     }[];
 
     if (rows.length > 0) {
@@ -99,15 +120,19 @@ export async function retrieve(
         similarity: r.similarity,
         vector_score: r.vector_score,
         keyword_score: r.keyword_score,
+        source_kind: r.source_kind ?? "node",
+        source_id: r.source_id ?? null,
       }));
-      mode = qEmbedding ? "hybrid" : "vector";
-      // Keyword-only when the embedder was down but the query still ran.
-      if (!qEmbedding) mode = "hybrid";
+      // Keyword-only when the embedder was down but the query still ran; the
+      // fusion is the same either way, so the mode name is too.
+      mode = "hybrid";
     }
   }
 
   if (candidates.length === 0) {
-    candidates = await corpusFallback(db, config, req);
+    candidates = assetIds
+      ? await assetFallback(db, config, req.userId, assetIds)
+      : await corpusFallback(db, config, req);
     mode = candidates.length > 0 ? "corpus" : "none";
   }
 
@@ -134,6 +159,48 @@ async function loadTitles(
   return new Map(
     (data ?? []).map((n: { id: string; title: string }) => [n.id, n.title ?? ""]),
   );
+}
+
+/**
+ * Attachments that have text but no chunks yet (OCR landed after the last
+ * embed pass). Reads the extracted text directly so an asset-scoped question
+ * is answerable the moment the text exists.
+ */
+async function assetFallback(
+  db: SupabaseClient,
+  config: AppConfig,
+  userId: string,
+  assetIds: string[],
+): Promise<RetrievedChunk[]> {
+  const maxChars = config.int("ai_corpus_fallback_max_chars", 8000);
+  const { data, error } = await db
+    .from("node_assets")
+    .select("id, node_id, caption, extracted_text, nodes!inner(id, title, user_id)")
+    .in("id", assetIds)
+    .eq("nodes.user_id", userId)
+    .not("extracted_text", "is", null);
+  if (error) throw error;
+
+  const rows = (data ?? []) as unknown as {
+    id: string;
+    node_id: string;
+    caption: string | null;
+    extracted_text: string | null;
+    nodes: { title: string | null };
+  }[];
+  if (rows.length === 0) return [];
+
+  const perAsset = Math.floor(maxChars / rows.length);
+  return rows
+    .filter((r) => (r.extracted_text ?? "").trim().length > 0)
+    .map((r) => ({
+      node_id: r.node_id,
+      title: r.caption ?? r.nodes?.title ?? "",
+      content: truncate(r.extracted_text ?? "", perAsset),
+      similarity: 0.5,
+      source_kind: "asset",
+      source_id: r.id,
+    }));
 }
 
 /**
@@ -186,6 +253,8 @@ async function corpusFallback(
       content: truncate(content, perNode),
       // Title hits rank above recent-but-unrelated notes.
       similarity: score > 0 ? 0.5 + Math.min(0.4, score * 0.1) : 0.2,
+      source_kind: "node",
+      source_id: node.id,
     });
   }
   return out;
