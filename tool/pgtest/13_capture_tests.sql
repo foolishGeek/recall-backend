@@ -144,7 +144,28 @@ BEGIN
   PERFORM pgtest_eq((SELECT rating FROM ai_interactions WHERE id = iid), -1::smallint,
     'the legacy rating column stays in step');
 
-  PERFORM ai_record_feedback(iid, 'citation_opened', 1::smallint);
+  -- Thumbs also arrive through the legacy RPC the app still calls. Flipping a
+  -- vote there must update, not collide with the one-vote index.
+  PERFORM ai_rate_interaction(iid, 1::smallint);
+  PERFORM pgtest_eq(ai_rate_interaction(iid, -1::smallint, 'wrong'), true,
+    'changing a thumbs up to a thumbs down is allowed');
+  PERFORM pgtest_eq(
+    (SELECT count(*)::int FROM ai_feedback WHERE interaction_id = iid AND kind = 'thumb'),
+    1, 'the flipped vote replaces the old one');
+  PERFORM ai_rate_interaction(iid, 0::smallint);
+  PERFORM pgtest_eq(
+    (SELECT count(*)::int FROM ai_feedback WHERE interaction_id = iid AND kind = 'thumb'),
+    0, 'clearing the rating withdraws the vote');
+
+  -- An answer cites several notes; which ones were opened is the whole label.
+  PERFORM ai_record_feedback(iid, 'citation_opened', 1::smallint, 'node-a');
+  PERFORM ai_record_feedback(iid, 'citation_opened', 1::smallint, 'node-b');
+  PERFORM ai_record_feedback(iid, 'citation_opened', 1::smallint, 'node-a');
+  PERFORM pgtest_eq(
+    (SELECT count(*)::int FROM ai_feedback
+     WHERE interaction_id = iid AND kind = 'citation_opened'),
+    2, 'each opened source is its own label, re-opening is not a second one');
+
   PERFORM ai_record_feedback(iid, 'regenerate', NULL, NULL, NULL);
   PERFORM ai_record_feedback(iid, 'regenerate', NULL, NULL, NULL);
   PERFORM pgtest_eq(
