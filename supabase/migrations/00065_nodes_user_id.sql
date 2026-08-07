@@ -17,12 +17,18 @@ ALTER TABLE nodes
 COMMENT ON COLUMN nodes.user_id IS
   'Owner denormalised from buckets.user_id. Always set while bucket_id is required; enables future bucketless notes.';
 
--- Existing rows: copy from the owning bucket.
+-- Existing rows: copy from the owning bucket. The writable-bucket trigger
+-- refuses UPDATEs when auth.uid() is null (migration context), so disable it
+-- for the backfill only.
+ALTER TABLE nodes DISABLE TRIGGER trigger_check_node_bucket_writable;
+
 UPDATE nodes n
 SET user_id = b.user_id
 FROM buckets b
 WHERE n.bucket_id = b.id
   AND n.user_id IS NULL;
+
+ALTER TABLE nodes ENABLE TRIGGER trigger_check_node_bucket_writable;
 
 -- Orphans should not exist under current constraints; refuse to proceed if any
 -- remain so we never set NOT NULL over NULL owners.
