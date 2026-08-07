@@ -1,0 +1,5 @@
+# Phase 2 FSRS per-user weight optimizer.
+# Pinned to families known to expose Optimizer.train() -> 21 FSRS-6 params.
+fsrs-optimizer>=5.0.0
+fsrs>=4.0.0
+supabase>=2.4.0

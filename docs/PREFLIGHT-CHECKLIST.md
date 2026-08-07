@@ -118,7 +118,6 @@ Do **not** schedule cron jobs in S00 (S16).
 
 Full checklist: [`PROD-DEPLOYMENT-DEFERRED.md`](PROD-DEPLOYMENT-DEFERRED.md). Not blocking S01–S26 on staging.
 
-- [ ] Sentry prod DSN
 - [ ] Prod Google OAuth (Web + Android `app.recall`)
 - [ ] Prod RC webhook + REST secret on Supabase; prod public SDK keys for Flutter dart-defines
 - [ ] Prod `FCM_SERVICE_ACCOUNT_JSON`
@@ -148,18 +147,6 @@ Prod RC app: optional in S00; dart-defines doc includes prod key slot.
 
 ---
 
-## Sentry `[D-OBS-1]`
-
-| Item | Status |
-|------|--------|
-| Project `recall-staging` (Flutter) | [x] |
-| Project `recall-prod` (Flutter) | [ ] deferred |
-| DSNs captured locally | staging [x] prod [ ] |
-
-Init in app: S02.
-
----
-
 ## Flutter dart-defines
 
 Documented in [`DART-DEFINES.md`](DART-DEFINES.md). Consumed from S02.
@@ -172,7 +159,6 @@ Documented in [`DART-DEFINES.md`](DART-DEFINES.md). Consumed from S02.
 - [x] Auth providers + redirect URLs configured (staging; Apple BLOCKED; iOS Google deferred)
 - [x] Staging EF secrets set; extensions enabled on staging
 - [x] RevenueCat staging app + 4 products + webhook URL reserved
-- [x] Sentry staging DSN captured; prod DSN deferred → S27
 - [x] Pre-flight checklist committed to `recall-backend`
 - [x] No schema migrations, Edge Functions, or Flutter code in this sprint
 

@@ -13,7 +13,7 @@
 | `00014_compute_due_rpc` applied | yes |
 | Vault `app_cron_secret` created (matches EF `CRON_SECRET`) | yes |
 | `00015_compute_due_cron` applied | yes |
-| `cron.job` `compute-due-15min` `*/15 * * * *` | active |
+| `cron.job` `compute-due-5min` `*/5 * * * *` (retightened from 15-min in `00035`) | active |
 | `compute-due` EF deployed (`verify_jwt=false`) | ACTIVE v1 |
 | POST no `X-Cron-Secret` | 401 |
 | POST wrong secret | 401 |
@@ -28,6 +28,9 @@
   quiet hours, frequency budget `[D-ENG-9]`, dedupe `[D-EF-9]`, tokens).
 - `00015_compute_due_cron.sql` — `invoke_compute_due()` (Vault-backed) +
   `cron.schedule('compute-due-15min', '*/15 * * * *', ...)`.
+  **Superseded:** `00035` retightens this to `compute-due-5min` `*/5 * * * *`,
+  and `00051` makes each run write a `cron_run_log` row. The live cadence is
+  5-min; the checks below that still say `compute-due-15min` are historical.
 
 ## Edge Function to deploy
 
@@ -68,7 +71,8 @@ Or via CLI (linked staging): `supabase db push` then
 | --- | --- |
 | `POST /functions/v1/compute-due` no `X-Cron-Secret` | `401 unauthorized`, no logic runs |
 | `POST /functions/v1/compute-due` with correct secret | `200 { users_evaluated, notifications_sent }` |
-| `select * from cron.job where jobname='compute-due-15min'` | one row, `*/15 * * * *` |
+| `select * from cron.job where jobname='compute-due-5min'` | one row, `*/5 * * * *` |
+| `select status,detail from cron_run_log where job='compute-due' order by created_at desc limit 1` | recent `ok` (or `misconfigured`/`error` explains a dead pipeline) |
 | User below threshold (`due_pool < 5`, no overdue P5) | not in `compute_due_candidates()` |
 | User at/over threshold, out of cooldown, has token | a `sent` row with `dedupe_key={uid}:{local_date}` |
 | Second tick same local day | no duplicate `sent` (`(dedupe_key,type)` UNIQUE) |

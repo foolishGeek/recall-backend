@@ -80,17 +80,7 @@ Store products in sandbox until App Store / Play listings exist (S23).
 
 ---
 
-## 6. Sentry
-
-1. [sentry.io](https://sentry.io) → Create organization.
-2. **Create project** → platform **Flutter** → name `recall-staging`.
-3. Copy DSN.
-4. Repeat for `recall-prod`.
-5. Save DSNs in local secrets vault (see `secrets/LOCAL-SECRETS.template.md`).
-
----
-
-## 7. Set Edge Function secrets
+## 6. Set Edge Function secrets
 
 ```bash
 cp .env.example .env
@@ -103,6 +93,6 @@ cp .env.example .env
 
 ---
 
-## 8. Verify
+## 7. Verify
 
 Tick items in [`PREFLIGHT-CHECKLIST.md`](PREFLIGHT-CHECKLIST.md).
