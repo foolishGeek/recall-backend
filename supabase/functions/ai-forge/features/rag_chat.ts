@@ -35,6 +35,9 @@ export async function ragChat(payload: Record<string, unknown>, userId: string, 
   const requestedNodes = scoped.nodeIds ?? asUuidArray(payload.node_ids);
   const creditIntent = payload.spend_credit === true ? "spend" : "ask";
   const clientRequestId = typeof payload.client_request_id === "string" ? payload.client_request_id : null;
+  const replacesInteractionId = typeof payload.replaces_interaction_id === "string"
+    ? payload.replaces_interaction_id
+    : null;
   let conversationId = typeof payload.conversation_id === "string" ? payload.conversation_id : null;
   const db = adminClient();
 
@@ -49,12 +52,21 @@ export async function ragChat(payload: Record<string, unknown>, userId: string, 
     throw new AppError("ai_cooldown", "Another answer is still generating — try again in a moment.");
   }
 
-  conversationId = await ensureConversation(db, userId, conversationId, {
-    bucket_ids: requestedBuckets,
-    node_ids: requestedNodes,
-  });
+  // Only an existing, owned thread counts. A new thread is not written until
+  // there is an answer to put in it, so a denied or failed send cannot leave an
+  // empty conversation behind.
+  conversationId = await resolveConversation(db, userId, conversationId);
 
-  const history = await boundedHistory(db, config, tier, userId, conversationId);
+  // Regenerate: the answer the user rejected must leave the thread before the
+  // retry reads it back as history, or the second attempt is a continuation of
+  // the answer it was meant to replace.
+  if (conversationId && replacesInteractionId) {
+    await dropSupersededTurn(db, userId, conversationId, replacesInteractionId);
+  }
+
+  const history = conversationId
+    ? await boundedHistory(db, config, tier, userId, conversationId)
+    : [];
   const retrievalQuestion = history.length > 0
     ? await rewriteQuestion(config, tier, question, history, { userId, conversationId })
     : question;
@@ -114,7 +126,11 @@ export async function ragChat(payload: Record<string, unknown>, userId: string, 
       .filter((n): n is { node_id: string; title: string; snippet: string } => !!n);
     if (citations.length === 0 && ctx.nodes.length > 0) citations = ctx.nodes;
 
-    await persistTurn(db, conversationId!, question, answer, citations, reservation.requestId);
+    conversationId ??= await createConversation(db, userId, {
+      bucket_ids: requestedBuckets,
+      node_ids: requestedNodes,
+    });
+    await persistTurn(db, conversationId, question, answer, citations, reservation.requestId);
 
     const hadNotes = ctx.nodes.length > 0;
     const interactionId = await logInteraction({
@@ -156,6 +172,10 @@ export async function ragChat(payload: Record<string, unknown>, userId: string, 
     });
 
     await captureRetrieval(interactionId, retrieved);
+    // A regenerate is a preference pair for free: this answer beat that one.
+    if (interactionId && replacesInteractionId) {
+      await recordRegenerate(db, userId, interactionId, replacesInteractionId);
+    }
 
     return {
       result: {
@@ -175,22 +195,28 @@ export async function ragChat(payload: Record<string, unknown>, userId: string, 
   });
 }
 
-async function ensureConversation(
+/** The caller's thread if it exists and is theirs; otherwise null. */
+async function resolveConversation(
   db: Db,
   userId: string,
   conversationId: string | null,
+): Promise<string | null> {
+  if (!conversationId) return null;
+  const { data } = await db
+    .from("ai_conversations")
+    .select("id")
+    .eq("id", conversationId)
+    .eq("user_id", userId)
+    .is("archived_at", null)
+    .maybeSingle();
+  return (data?.id as string | undefined) ?? null;
+}
+
+async function createConversation(
+  db: Db,
+  userId: string,
   scope: Record<string, unknown>,
 ): Promise<string> {
-  if (conversationId) {
-    const { data } = await db
-      .from("ai_conversations")
-      .select("id")
-      .eq("id", conversationId)
-      .eq("user_id", userId)
-      .is("archived_at", null)
-      .maybeSingle();
-    if (data?.id) return data.id as string;
-  }
   const { data, error } = await db
     .from("ai_conversations")
     .insert({ user_id: userId, scope })
@@ -198,6 +224,69 @@ async function ensureConversation(
     .single();
   if (error) throw error;
   return data.id as string;
+}
+
+/**
+ * Remove the rejected question/answer pair from the thread. Keyed on the
+ * replaced interaction's ledger id so it can only ever drop the turn the client
+ * actually discarded. Best-effort: failing to tidy up must not block the retry.
+ */
+async function dropSupersededTurn(
+  db: Db,
+  userId: string,
+  conversationId: string,
+  replacedInteractionId: string,
+): Promise<void> {
+  try {
+    const { data: prior } = await db
+      .from("ai_interactions")
+      .select("request_id")
+      .eq("id", replacedInteractionId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    const requestId = (prior as { request_id: string | null } | null)?.request_id;
+    if (!requestId) return;
+
+    const { data: assistant } = await db
+      .from("ai_messages")
+      .select("id, created_at")
+      .eq("conversation_id", conversationId)
+      .eq("request_id", requestId)
+      .maybeSingle();
+    const row = assistant as { id: string; created_at: string } | null;
+    if (!row) return;
+
+    const { data: asked } = await db
+      .from("ai_messages")
+      .select("id")
+      .eq("conversation_id", conversationId)
+      .eq("role", "user")
+      .lt("created_at", row.created_at)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const ids = [row.id, (asked as { id: string } | null)?.id].filter(Boolean) as string[];
+    await db.from("ai_messages").delete().in("id", ids);
+  } catch (e) {
+    console.error("dropSupersededTurn failed:", (e as Error).message);
+  }
+}
+
+/** The winner/loser pair behind a regenerate tap. */
+async function recordRegenerate(
+  db: Db,
+  userId: string,
+  interactionId: string,
+  replacedInteractionId: string,
+): Promise<void> {
+  const { error } = await db.from("ai_feedback").insert({
+    user_id: userId,
+    interaction_id: interactionId,
+    kind: "regenerate",
+    replaced_interaction_id: replacedInteractionId,
+  });
+  if (error) console.error("regenerate feedback failed:", error.message);
 }
 
 interface WindowRow {
