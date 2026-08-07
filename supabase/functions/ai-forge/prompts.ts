@@ -91,3 +91,12 @@ ${typeGuide}
 - Keep prompts concise; never reveal the answer inside the prompt text.
 Output a single JSON object: { "questions": [ ... ] }`;
 }
+
+export const SUGGEST_PROMPTS_SYSTEM = `${BASE_SYSTEM}
+
+Suggest three short starter questions a student would ask about their notes in SCOPE.
+Rules:
+- First person ("What did I…", "Quiz me on…", "Summarize my…").
+- Grounded in the note titles and tags provided; never invent a note title.
+- Each question under 80 characters. No numbering, no quotes around the whole list.
+Output JSON only: { "suggestions": ["…", "…", "…"] }`;

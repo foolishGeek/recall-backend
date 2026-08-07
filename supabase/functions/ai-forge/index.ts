@@ -13,6 +13,7 @@ import { summarize } from "./features/summarize.ts";
 import { evaluate } from "./features/evaluate.ts";
 import { quizGenerate } from "./features/quiz_generate.ts";
 import { quizGrade } from "./features/quiz_grade.ts";
+import { suggestPrompts } from "./features/suggest_prompts.ts";
 
 Deno.serve(async (req) => {
   const pre = handlePreflight(req);
@@ -49,6 +50,8 @@ Deno.serve(async (req) => {
         return jsonResponse(await quizGenerate(payload, requireUser(), config));
       case "quiz_grade":
         return jsonResponse(await quizGrade(payload, requireUser(), config));
+      case "suggest_prompts":
+        return jsonResponse(await suggestPrompts(payload, requireUser(), config));
       default:
         throw new AppError("invalid_input", `unknown feature: ${feature}`);
     }
