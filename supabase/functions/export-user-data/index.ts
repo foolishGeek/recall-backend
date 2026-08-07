@@ -6,6 +6,8 @@
 //   -> { status: "ready", signed_url, url_expires_at, file_expires_at,
 //        generated_at }  |  { status: "none" }
 // Inner JSON schemas are pinned in CANON-DECISIONS.md [D-EF-5].
+// Contents: profile, buckets, nodes, reviews, tags, quiz_attempts, and the
+// Ask Aura transcript (ai_conversations + ai_messages).
 
 import JSZip from "https://esm.sh/jszip@3.10.1";
 import { handlePreflight } from "../_shared/cors.ts";
@@ -83,19 +85,17 @@ async function generateExport(
     .select("id, name, cooling_period, frequency, daily_cap, created_at")
     .eq("user_id", userId);
   if (bErr) throw bErr;
-  const bucketIds = (buckets ?? []).map((b) => b.id as string);
 
-  let nodes: unknown[] = [];
-  if (bucketIds.length > 0) {
-    const { data, error } = await db
-      .from("nodes")
-      .select(
-        "id, bucket_id, type, title, markdown, url, link_preview_json, priority, difficulty, comfort, stability, due_at, reps, lapses, state, created_at, updated_at",
-      )
-      .in("bucket_id", bucketIds);
-    if (error) throw error;
-    nodes = data ?? [];
-  }
+  // Keyed on nodes.user_id rather than the bucket list, so a note that belongs
+  // to no bucket is still the user's and still leaves in their export.
+  const { data: nodeRows, error: nErr } = await db
+    .from("nodes")
+    .select(
+      "id, bucket_id, type, title, markdown, url, link_preview_json, priority, difficulty, comfort, stability, due_at, reps, lapses, state, created_at, updated_at",
+    )
+    .eq("user_id", userId);
+  if (nErr) throw nErr;
+  const nodes = nodeRows ?? [];
 
   const { data: reviews, error: rErr } = await db
     .from("reviews")
@@ -115,6 +115,25 @@ async function generateExport(
     .eq("user_id", userId);
   if (qErr) throw qErr;
 
+  // Ask Aura transcripts are the user's own words and belong in the export.
+  const { data: conversations, error: cErr } = await db
+    .from("ai_conversations")
+    .select("id, title, scope, created_at, last_message_at, archived_at")
+    .eq("user_id", userId);
+  if (cErr) throw cErr;
+
+  const conversationIds = (conversations ?? []).map((c) => c.id as string);
+  let messages: unknown[] = [];
+  if (conversationIds.length > 0) {
+    const { data, error } = await db
+      .from("ai_messages")
+      .select("id, conversation_id, role, content, citations, created_at")
+      .in("conversation_id", conversationIds)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    messages = data ?? [];
+  }
+
   const zip = new JSZip();
   const stamp = (v: unknown) => JSON.stringify(v ?? [], null, 2);
   zip.file("profile.json", JSON.stringify(profileOut, null, 2));
@@ -123,6 +142,8 @@ async function generateExport(
   zip.file("reviews.json", stamp(reviews));
   zip.file("tags.json", stamp(tags));
   zip.file("quiz_attempts.json", stamp(quizAttempts));
+  zip.file("ai_conversations.json", stamp(conversations));
+  zip.file("ai_messages.json", stamp(messages));
 
   const bytes = await zip.generateAsync({ type: "uint8array" });
   const path = storagePath(userId);
