@@ -54,6 +54,16 @@ ALTER TABLE ai_feedback ADD CONSTRAINT ai_feedback_kind_chk CHECK (
   )
 );
 
+-- The 00069 version of ai_rate_interaction appended a row per rating, so a user
+-- who changed their mind already has more than one thumb. Keep the newest before
+-- the constraint that makes that impossible.
+DELETE FROM ai_feedback f
+USING ai_feedback keep
+WHERE f.interaction_id = keep.interaction_id
+  AND f.kind = keep.kind
+  AND f.kind <> 'regenerate'
+  AND (keep.created_at, keep.id) > (f.created_at, f.id);
+
 -- One vote per kind per interaction; re-tapping updates instead of duplicating.
 -- Regenerate pairs are events, not votes, so they are excluded.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_feedback_once
