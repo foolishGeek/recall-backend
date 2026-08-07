@@ -4,7 +4,7 @@
 // the model (general knowledge) and counts as one AI request.
 
 import { adminClient } from "../../_shared/supabase.ts";
-import { resolveScope } from "../../_shared/scope.ts";
+import { resolveScope, shimScopeRequest } from "../../_shared/scope.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { stripHtml, truncate } from "../../_shared/text.ts";
 import { retrieve } from "../../_shared/retrieve.ts";
@@ -17,8 +17,10 @@ import { RAG_SYSTEM } from "../prompts.ts";
 
 export async function ragChat(payload: Record<string, unknown>, userId: string, config: AppConfig) {
   const question = truncate(stripHtml(requireString(payload.question, "question")), 2000);
-  const requestedBuckets = asUuidArray(payload.bucket_ids);
-  const requestedNodes = asUuidArray(payload.node_ids);
+  // Prefer the new { scope: { kind, ids } } descriptor; fall back to legacy ids.
+  const scoped = shimScopeRequest(payload);
+  const requestedBuckets = scoped.bucketIds ?? asUuidArray(payload.bucket_ids);
+  const requestedNodes = scoped.nodeIds ?? asUuidArray(payload.node_ids);
   // Chat never auto-spends a credit during cooldown: the first call ASKS (429
   // ai_cooldown -> interstitial); an explicit "Continue with 1 credit" retry
   // sends spend_credit:true so the gate deducts a credit (or 403) [D-AI-1].
@@ -37,6 +39,8 @@ export async function ragChat(payload: Record<string, unknown>, userId: string, 
   const scope = await resolveScope(db, userId, {
     bucketIds: requestedBuckets,
     nodeIds: requestedNodes,
+    assetIds: scoped.assetIds,
+    scope: scoped.scope,
   });
 
   const retrieved = scope.isEmpty
@@ -81,19 +85,35 @@ export async function ragChat(payload: Record<string, unknown>, userId: string, 
     const interactionId = await logInteraction({
       userId,
       feature: "rag_chat",
-      scope: { bucket_ids: requestedBuckets ?? null, node_ids: requestedNodes ?? null },
+      scope: {
+        kind: scope.kind,
+        ids: scope.kind === "nodes"
+          ? (scope.nodeIds ?? [])
+          : scope.kind === "assets"
+          ? (scope.assetIds ?? [])
+          : scope.bucketIds,
+        bucket_ids: requestedBuckets ?? null,
+        node_ids: requestedNodes ?? null,
+      },
       retrievedNodeIds: ctx.nodes.map((n) => n.node_id),
       hadNotes,
       blend: hadNotes ? "blended" : "general_only",
       model: gen.model,
+      provider: gen.provider,
       latencyMs,
       inputTokens: gen.usage.input_tokens,
       outputTokens: gen.usage.output_tokens,
+      requestId: reservation.requestId,
+      temperature: reservation.temperature,
+      maxTokens: reservation.maxTokens,
+      scopeKind: scope.kind,
+      retrievalMode: retrieved?.mode ?? "none",
       payload: { question, context: ctx.text, answer },
     });
     return {
       result: { answer, citations, model: gen.model, usage: gen.usage, interaction_id: interactionId },
       model: gen.model,
+      provider: gen.provider,
       inputTokens: gen.usage.input_tokens,
       outputTokens: gen.usage.output_tokens,
       cacheResponse: true,

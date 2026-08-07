@@ -14,10 +14,24 @@ import { withMeteredRequest } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
 import { userDirectives } from "../../_shared/user_prefs.ts";
 import { requireUuid } from "../../_shared/validate.ts";
+import { shimScopeRequest } from "../../_shared/scope.ts";
 import { SUMMARIZE_SYSTEM } from "../prompts.ts";
 
 export async function summarize(payload: Record<string, unknown>, userId: string, config: AppConfig) {
-  const scope = payload.scope === "node" ? "node" : payload.scope === "bucket" ? "bucket" : null;
+  // New descriptor: { scope: { kind: 'nodes'|'buckets', ids: [...] } }.
+  // Legacy: scope = 'node'|'bucket' plus node_id / bucket_id.
+  const shimmed = shimScopeRequest(payload);
+  let scope: "node" | "bucket" | null = null;
+  let body = payload;
+  if (shimmed.scope?.kind === "nodes" && shimmed.scope.ids.length === 1) {
+    scope = "node";
+    body = { ...payload, node_id: shimmed.scope.ids[0] };
+  } else if (shimmed.scope?.kind === "buckets" && shimmed.scope.ids.length === 1) {
+    scope = "bucket";
+    body = { ...payload, bucket_id: shimmed.scope.ids[0] };
+  } else {
+    scope = payload.scope === "node" ? "node" : payload.scope === "bucket" ? "bucket" : null;
+  }
   if (!scope) throw new AppError("invalid_input", "scope must be 'bucket' or 'node'");
   const db = adminClient();
 
@@ -25,21 +39,22 @@ export async function summarize(payload: Record<string, unknown>, userId: string
   let scopeName = "";
 
   if (scope === "node") {
-    const nodeId = requireUuid(payload.node_id, "node_id");
+    const nodeId = requireUuid(body.node_id, "node_id");
     const { data: node } = await db
       .from("nodes")
-      .select("title, extracted_text, markdown, url, link_preview_json, buckets!inner(user_id, deleted_at)")
+      .select("title, extracted_text, markdown, url, link_preview_json, user_id, buckets!inner(user_id, deleted_at)")
       .eq("id", nodeId)
       .is("deleted_at", null)
       .maybeSingle();
-    const n = rowAs<NodeRow & { buckets?: { user_id?: string } }>(node);
-    if (!n || n.buckets?.user_id !== userId) throw new AppError("invalid_input", "node not found");
+    const n = rowAs<NodeRow & { user_id?: string; buckets?: { user_id?: string } }>(node);
+    const owner = n?.user_id ?? n?.buckets?.user_id;
+    if (!n || owner !== userId) throw new AppError("invalid_input", "node not found");
     const text = nodeCorpusText({ ...n, id: nodeId });
     if (!text) throw new AppError("empty_context");
     scopeName = n.title ?? "";
     contextText = `[Node: ${scopeName}]\n${truncate(text, config.int("ai_node_text_max_chars", 8000))}`;
   } else {
-    const bucketId = requireUuid(payload.bucket_id, "bucket_id");
+    const bucketId = requireUuid(body.bucket_id, "bucket_id");
     const { data: bucket } = await db
       .from("buckets")
       .select("name, user_id")
@@ -105,18 +120,30 @@ export async function summarize(payload: Record<string, unknown>, userId: string
     await logInteraction({
       userId,
       feature: "summarize",
-      scope: { scope, node_id: payload.node_id ?? null, bucket_id: payload.bucket_id ?? null },
+      scope: {
+        kind: scope === "node" ? "nodes" : "buckets",
+        ids: scope === "node" ? [String(body.node_id)] : [String(body.bucket_id)],
+        scope,
+        node_id: body.node_id ?? null,
+        bucket_id: body.bucket_id ?? null,
+      },
       hadNotes: true,
       blend: "notes_only",
       model: gen.model,
+      provider: gen.provider,
       latencyMs,
       inputTokens: gen.usage.input_tokens,
       outputTokens: gen.usage.output_tokens,
+      requestId: reservation.requestId,
+      temperature: reservation.temperature,
+      maxTokens: reservation.maxTokens,
+      scopeKind: scope === "node" ? "nodes" : "buckets",
       payload: { context: contextText, summary, key_themes: keyThemes },
     });
     return {
       result: { summary, key_themes: keyThemes, model: gen.model, usage: gen.usage },
       model: gen.model,
+      provider: gen.provider,
       inputTokens: gen.usage.input_tokens,
       outputTokens: gen.usage.output_tokens,
     };
