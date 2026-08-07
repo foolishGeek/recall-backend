@@ -1,25 +1,19 @@
-// Feature: rag_chat. Embed the question, retrieve owned chunks within the
-// active-bucket scope, then answer with citations. Policy [D-AI-5]: answers are
-// BLENDED — notes-first, enriched with general knowledge. Vector misses fall
-// back to the nodes' direct corpus at every scope; an empty corpus still calls
+// Feature: rag_chat. Retrieve owned chunks within the active-bucket scope,
+// then answer with citations. Policy [D-AI-5]: answers are BLENDED —
+// notes-first, enriched with general knowledge. An empty corpus still calls
 // the model (general knowledge) and counts as one AI request.
 
 import { adminClient } from "../../_shared/supabase.ts";
 import { resolveScope } from "../../_shared/scope.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { stripHtml, truncate } from "../../_shared/text.ts";
-import { formatContext, RetrievedChunk } from "../../_shared/context.ts";
-import { nodeCorpusText, NodeRow } from "../../_shared/node_corpus.ts";
-import { embedQuery } from "../../_shared/providers/embed.ts";
+import { retrieve } from "../../_shared/retrieve.ts";
 import { generateJson, Tier } from "../../_shared/providers/route.ts";
 import { assertAllowed, gateCheck, MeterInput, withMeteredRequest } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
 import { userDirectives } from "../../_shared/user_prefs.ts";
 import { requireString, asUuidArray } from "../../_shared/validate.ts";
 import { RAG_SYSTEM } from "../prompts.ts";
-
-// Cap how many nodes we pull for the corpus fallback before char-trimming.
-const MAX_FALLBACK_NODES = 40;
 
 export async function ragChat(payload: Record<string, unknown>, userId: string, config: AppConfig) {
   const question = truncate(stripHtml(requireString(payload.question, "question")), 2000);
@@ -44,70 +38,18 @@ export async function ragChat(payload: Record<string, unknown>, userId: string, 
     bucketIds: requestedBuckets,
     nodeIds: requestedNodes,
   });
-  const scopeIds = scope.bucketIds;
 
-  let retrieved: RetrievedChunk[] = [];
+  const retrieved = scope.isEmpty
+    ? null
+    : await retrieve(db, config, {
+      feature: "rag_chat",
+      userId,
+      query: question,
+      bucketIds: scope.bucketIds,
+      nodeIds: scope.nodeIds,
+    });
 
-  if (!scope.isEmpty) {
-    // Embed the question and try vector retrieval first. A null vector means
-    // embedding is unavailable right now; the corpus fallback below still runs.
-    const qEmbedding = await embedQuery(config, question);
-
-    const { data: matches, error: matchErr } = qEmbedding
-      ? await db.rpc("match_chunks", {
-        query_embedding: JSON.stringify(qEmbedding),
-        match_user_id: userId,
-        match_count: config.int("ai_rag_top_k", 8),
-        match_threshold: config.num("ai_rag_similarity_threshold", 0.7),
-        filter_bucket_ids: scopeIds,
-        filter_node_ids: scope.nodeIds,
-      })
-      : { data: null, error: null };
-    if (matchErr) throw matchErr;
-
-    const rows = (matches ?? []) as { node_id: string; content: string; similarity: number }[];
-
-    if (rows.length > 0) {
-      const nodeIds = [...new Set(rows.map((r) => r.node_id))];
-      const { data: titleRows } = await db.from("nodes").select("id, title").in("id", nodeIds);
-      const titles = new Map<string, string>(
-        (titleRows ?? []).map((n: { id: string; title: string }) => [n.id, n.title]),
-      );
-      retrieved = rows.map((r) => ({
-        node_id: r.node_id,
-        title: titles.get(r.node_id) ?? "",
-        content: r.content,
-        similarity: r.similarity,
-      }));
-    } else {
-      // Vector miss — fall back to the nodes' direct corpus so chat works even
-      // when chunks were never embedded (e.g. empty extracted_text). Scoped to
-      // the requested nodes when present, otherwise the whole active scope.
-      let q = db
-        .from("nodes")
-        .select("id, title, extracted_text, markdown, url, link_preview_json, bucket_id")
-        .in("bucket_id", scopeIds)
-        .is("deleted_at", null);
-      if (requestedNodes?.length) q = q.in("id", requestedNodes);
-      const { data: nodeRows, error: nodeErr } = await q.limit(MAX_FALLBACK_NODES);
-      if (nodeErr) throw nodeErr;
-
-      retrieved = (nodeRows ?? [])
-        .map((n: NodeRow) => {
-          const content = nodeCorpusText(n);
-          if (!content) return null;
-          return {
-            node_id: n.id,
-            title: n.title ?? "",
-            content,
-            similarity: 1,
-          } satisfies RetrievedChunk;
-        })
-        .filter((c): c is RetrievedChunk => c !== null);
-    }
-  }
-
-  const ctx = formatContext(retrieved, config.int("ai_context_max_chars", 12000));
+  const ctx = retrieved?.context ?? { text: "", nodes: [], used: [] };
 
   // Blended policy: always answer (notes-first, general knowledge fills gaps).
   // Even an empty corpus calls the model and counts as one AI request.

@@ -7,9 +7,8 @@ import { adminClient, rowAs } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
 import { truncate } from "../../_shared/text.ts";
-import { formatContext, RetrievedChunk } from "../../_shared/context.ts";
 import { nodeCorpusText, NodeRow } from "../../_shared/node_corpus.ts";
-import { embedQuery } from "../../_shared/providers/embed.ts";
+import { retrieve } from "../../_shared/retrieve.ts";
 import { generateJson, Tier } from "../../_shared/providers/route.ts";
 import { withMeteredRequest } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
@@ -72,39 +71,17 @@ export async function summarize(payload: Record<string, unknown>, userId: string
         )
         .join("\n---\n");
     } else {
-      // Large bucket: retrieve key chunks via RAG over a themes query.
-      const qEmbedding = await embedQuery(config, "key themes and facts in this bucket");
-      const { data: matches } = qEmbedding
-        ? await db.rpc("match_chunks", {
-          query_embedding: JSON.stringify(qEmbedding),
-          match_user_id: userId,
-          match_count: maxNodes * 2,
-          match_threshold: 0.0,
-          filter_bucket_ids: [bucketId],
-          filter_node_ids: null,
-        })
-        : { data: null };
-      const rows = (matches ?? []) as { node_id: string; content: string; similarity: number }[];
-      const titles = new Map<string, string>(
-        withText.map((x: { node: NodeRow }) => [x.node.id, x.node.title ?? ""]),
-      );
-      const retrieved: RetrievedChunk[] = rows.map((r) => ({
-        node_id: r.node_id,
-        title: titles.get(r.node_id) ?? "",
-        content: r.content,
-        similarity: r.similarity,
-      }));
-      contextText = formatContext(retrieved, config.int("ai_context_max_chars", 12000)).text;
-      // No embedded chunks yet → fall back to a corpus concat of the first nodes.
-      if (!contextText) {
-        const perNode = Math.floor(config.int("ai_context_max_chars", 12000) / maxNodes);
-        contextText = withText
-          .slice(0, maxNodes)
-          .map((x: { node: NodeRow; corpus: string }) =>
-            `[Node: ${x.node.title ?? ""}]\n${truncate(x.corpus, perNode)}`
-          )
-          .join("\n---\n");
-      }
+      // Large bucket: hybrid retrieve over a themes query, then format.
+      const found = await retrieve(db, config, {
+        feature: "summarize",
+        userId,
+        query: "key themes and facts in this bucket",
+        bucketIds: [bucketId],
+        nodeIds: null,
+        topK: maxNodes * 2,
+        threshold: config.num("ai_rag_summarize_similarity_threshold", 0.0),
+      });
+      contextText = found.context.text;
       if (!contextText) throw new AppError("empty_context");
     }
   }

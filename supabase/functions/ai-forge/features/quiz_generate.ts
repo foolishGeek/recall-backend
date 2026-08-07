@@ -14,9 +14,8 @@ import { resolveScope } from "../../_shared/scope.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
 import { truncate } from "../../_shared/text.ts";
-import { formatContext, RetrievedChunk } from "../../_shared/context.ts";
 import { nodeCorpusText, NodeRow } from "../../_shared/node_corpus.ts";
-import { embedQuery } from "../../_shared/providers/embed.ts";
+import { retrieve } from "../../_shared/retrieve.ts";
 import { generateQuizQuestions, normalizeQuestions } from "../quiz_json.ts";
 import { withMeteredRequest } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
@@ -154,35 +153,18 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
       }
       topics = [...titles.slice(0, 12), ...tagNames.slice(0, 8)].join(", ");
 
-      // RAG over the scope using the prompt + collective topics as the query.
+      // Hybrid retrieve over the scope using the prompt + collective topics.
       const query = [prompt, topics].filter(Boolean).join(". ") || "key themes";
-      const qEmbedding = await embedQuery(config, query);
-      const { data: matches } = qEmbedding
-        ? await db.rpc("match_chunks", {
-          query_embedding: JSON.stringify(qEmbedding),
-          match_user_id: userId,
-          match_count: config.int("ai_rag_top_k", 8),
-          match_threshold: config.num("ai_rag_similarity_threshold", 0.7),
-          filter_bucket_ids: scopeIds,
-          filter_node_ids: scope.nodeIds,
-        })
-        : { data: null };
-      const rows = (matches ?? []) as { node_id: string; content: string; similarity: number }[];
-      if (rows.length) {
-        for (const r of rows) retrievedNodeIds.add(r.node_id);
-        const retrieved: RetrievedChunk[] = rows.map((r) => ({
-          node_id: r.node_id,
-          title: "",
-          content: r.content,
-          similarity: r.similarity,
-        }));
-        context = formatContext(retrieved, maxChars).text;
-      } else {
-        // No embedded chunks yet → corpus fallback over the scope.
-        let q = db.from("nodes").select(CORPUS_FIELDS).in("bucket_id", scopeIds).is("deleted_at", null).limit(20);
-        if (requestedNodes?.length) q = q.in("id", requestedNodes);
-        const { data: nodeRows } = await q;
-        context = corpusBlocks((nodeRows ?? []) as NodeRow[]);
+      const found = await retrieve(db, config, {
+        feature: "quiz_generate",
+        userId,
+        query,
+        bucketIds: scopeIds,
+        nodeIds: scope.nodeIds,
+      });
+      if (found.context.text) {
+        for (const n of found.context.nodes) retrievedNodeIds.add(n.node_id);
+        context = found.context.text;
       }
     }
 
