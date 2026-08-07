@@ -135,4 +135,57 @@ check "balance is zero, never negative" \
   "$(q "SELECT ai_credit_balance FROM profiles WHERE id='$U';")" 0
 
 echo
+echo '# parallel drainers never embed the same note twice'
+# The cron tick and the trigger nudge can arrive together, so this is the
+# guarantee the whole queue design rests on.
+q "DELETE FROM ai_embed_queue;" >/dev/null
+U=$(q "WITH u AS (
+         INSERT INTO auth.users (id, email, confirmed_at)
+         VALUES (gen_random_uuid(), 'conc-drain@test.local', now()) RETURNING id
+       )
+       INSERT INTO profiles (id) SELECT id FROM u RETURNING id;")
+B=$(q "INSERT INTO buckets (user_id, name) VALUES ('$U','Drain') RETURNING id;")
+q "INSERT INTO nodes (bucket_id, title, extracted_text, content_hash)
+   SELECT '$B', 'Note ' || i, 'text ' || i, 'h' || i
+   FROM generate_series(1, 40) AS i;" >/dev/null
+check "40 notes are queued" \
+  "$(q "SELECT count(*) FROM ai_embed_queue WHERE status='pending';")" 40
+
+# Eight drainers claim at once, each writing what it got to its own file.
+CLAIMS=$(mktemp -d)
+for i in $(seq 1 8); do
+  "$PGBIN/psql" -qtAX -d "$DB" \
+    -c "SELECT source_id FROM ai_embed_claim(10);" >"$CLAIMS/$i" 2>/dev/null &
+done
+wait
+TOTAL=$(cat "$CLAIMS"/* | grep -c . || true)
+UNIQUE=$(cat "$CLAIMS"/* | grep . | sort -u | wc -l | tr -d ' ')
+rm -rf "$CLAIMS"
+
+check "every claimed note was claimed once" "$TOTAL" "$UNIQUE"
+check "no note was handed out twice" "$UNIQUE" "$TOTAL"
+check "claims are marked processing" \
+  "$(q "SELECT count(*) FROM ai_embed_queue WHERE status='processing';")" "$TOTAL"
+
+echo
+echo '# parallel chunk writers leave one clean generation'
+# Two drainers racing on the same note must not interleave into a mixed set.
+N=$(q "INSERT INTO nodes (bucket_id, title, extracted_text, content_hash)
+       VALUES ('$B','Raced','text','hr') RETURNING id;")
+VEC=$(q "SELECT jsonb_agg(0.0)::text FROM generate_series(1,1536);")
+for i in $(seq 1 6); do
+  "$PGBIN/psql" -qtAX -d "$DB" -c \
+    "SELECT node_chunks_replace('$N', jsonb_build_array(
+       jsonb_build_object('chunk_index',0,'content','gen-$i','token_count',3,'embedding','$VEC'::jsonb),
+       jsonb_build_object('chunk_index',1,'content','gen-$i','token_count',3,'embedding','$VEC'::jsonb),
+       jsonb_build_object('chunk_index',2,'content','gen-$i','token_count',3,'embedding','$VEC'::jsonb)));" \
+    >/dev/null 2>&1 &
+done
+wait
+check "exactly one generation survives" \
+  "$(q "SELECT count(*) FROM node_chunks WHERE node_id='$N';")" 3
+check "and all its chunks come from the same writer" \
+  "$(q "SELECT count(DISTINCT content) FROM node_chunks WHERE node_id='$N';")" 1
+
+echo
 echo "all $pass concurrency checks passed"
