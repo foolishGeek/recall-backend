@@ -17,47 +17,84 @@ import { requireString } from "../_shared/validate.ts";
 const PDF_BUCKET = "node-pdfs";
 const MAX_BYTES = 20 * 1024 * 1024; // 20 MB [D-EF-1]
 
-async function sha256Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+function toHex(digest: ArrayBuffer): string {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+async function sha256Hex(text: string): Promise<string> {
+  return toHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+}
+
+async function sha256Buffer(data: ArrayBuffer): Promise<string> {
+  return toHex(await crypto.subtle.digest("SHA-256", data));
+}
+
+const PARSER = "unpdf";
+const PARSER_VERSION = "1";
+
+/**
+ * Record the parse lineage: which file, which parser, and the page structure.
+ * Page boundaries are what later make precise citations, per-page retrieval and
+ * structure-aware chunking possible, so they are kept even though the note only
+ * stores the flattened text. Best-effort — never breaks the PDF path.
+ */
 async function writeIngestBestEffort(args: {
   userId: string;
   nodeId: string;
   assetId: string | null;
   storagePath: string;
+  pages: { page: number; content: string }[];
   pageCount: number;
-  extracted: string;
+  bytes: number;
+  sha256: string;
 }): Promise<void> {
   try {
     const db = adminClient();
     const { data: doc, error: docErr } = await db
       .from("ingest_documents")
-      .insert({
+      .upsert({
         user_id: args.userId,
         node_id: args.nodeId,
         asset_id: args.assetId,
         source_kind: "pdf",
+        source_id: args.assetId,
         storage_path: args.storagePath,
+        mime_type: "application/pdf",
+        bytes: args.bytes,
+        sha256: args.sha256,
+        parser: PARSER,
+        parser_version: PARSER_VERSION,
         page_count: args.pageCount,
         status: "ready",
-      })
+      }, { onConflict: "user_id,storage_path,sha256" })
       .select("id")
       .maybeSingle();
     if (docErr || !doc) {
-      console.warn("extract-pdf-text: ingest_documents insert skipped:", docErr?.message);
+      console.warn("extract-pdf-text: ingest_documents write skipped:", docErr?.message);
       return;
     }
+    const documentId = (doc as { id: string }).id;
 
-    // unpdf mergePages joins pages; store one segment so structure is retained
-    // even without per-page splits today.
-    const { error: segErr } = await db.from("ingest_segments").insert({
-      document_id: (doc as { id: string }).id,
-      segment_index: 0,
-      page_number: null,
-      content: args.extracted,
+    // Offsets are into the same joined string that becomes nodes.extracted_text,
+    // so a chunk can be traced back to a page.
+    let cursor = 0;
+    const segments = args.pages.map((p, i) => {
+      const charStart = cursor;
+      cursor += p.content.length + 1; // the "\n" used to join pages
+      return {
+        document_id: documentId,
+        segment_index: i,
+        page_number: p.page,
+        content: p.content,
+        char_start: charStart,
+        char_end: charStart + p.content.length,
+      };
     });
+
+    if (segments.length === 0) return;
+
+    await db.from("ingest_segments").delete().eq("document_id", documentId);
+    const { error: segErr } = await db.from("ingest_segments").insert(segments);
     if (segErr) {
       console.warn("extract-pdf-text: ingest_segments insert skipped:", segErr.message);
     }
@@ -102,12 +139,21 @@ Deno.serve(async (req) => {
       throw new AppError("invalid_input", "PDF exceeds the 20 MB limit");
     }
 
-    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const buffer = await blob.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
     const pdf = await getDocumentProxy(bytes);
-    const { totalPages, text } = await extractText(pdf, { mergePages: true });
-    const extracted = (Array.isArray(text) ? text.join("\n") : text).trim();
+    // Per page, not merged: blank pages are dropped but the surviving pages keep
+    // their real page numbers, and the joined text is exactly what the segment
+    // character offsets refer to.
+    const { totalPages, text } = await extractText(pdf, { mergePages: false });
+    const rawPages = Array.isArray(text) ? text.map((t) => String(t ?? "")) : [String(text ?? "")];
+    const pages = rawPages
+      .map((content, i) => ({ page: i + 1, content: content.trim() }))
+      .filter((p) => p.content.length > 0);
+    const extracted = pages.map((p) => p.content).join("\n");
 
     const contentHash = await sha256Hex(extracted);
+    const fileSha = await sha256Buffer(buffer);
     const { error: updErr } = await db
       .from("nodes")
       .update({ extracted_text: extracted, content_hash: contentHash })
@@ -131,8 +177,10 @@ Deno.serve(async (req) => {
         nodeId,
         assetId,
         storagePath,
+        pages,
         pageCount: totalPages,
-        extracted,
+        bytes: buffer.byteLength,
+        sha256: fileSha,
       });
     }
 
