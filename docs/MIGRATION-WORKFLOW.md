@@ -100,6 +100,42 @@ MCP tools alone. After prod push, update `docs/PROD-DEPLOYMENT-DEFERRED.md` (the
 
 ---
 
+## Out-of-band migrations (history drift)
+
+Applying SQL through the dashboard or the Supabase MCP `apply_migration` tool records a
+**timestamped** version (`20260723213738`) instead of a repo version (`00059`). `db push` then
+refuses to run:
+
+```
+Remote migration versions not found in local migrations directory.
+```
+
+Do **not** blindly run the suggested `repair`. First identify what the remote rows actually
+contain, then confirm the repo already covers that SQL:
+
+```bash
+# names of the drifted versions
+psql "$DB_URL" -c "SELECT version, name FROM supabase_migrations.schema_migrations
+                   WHERE version NOT LIKE '000%';"
+# their statements, to diff against the repo file
+psql "$DB_URL" -c "SELECT array_to_string(statements, E'\n') FROM
+                   supabase_migrations.schema_migrations WHERE version = '<version>';"
+```
+
+Only when the repo file is a superset of those statements, drop the duplicate history rows and
+let the numbered file re-apply (our migrations are written to be re-runnable):
+
+```bash
+supabase migration repair --status reverted <version> <version>
+supabase db push --linked --dry-run   # confirm the expected list
+supabase db push --linked
+```
+
+Re-applying the numbered file is the point: it makes the live schema match the repo rather than
+trusting that the out-of-band pieces summed to the same result.
+
+---
+
 ## Rules
 
 - **Never** push untested migrations directly to prod.
