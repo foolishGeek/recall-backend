@@ -17,6 +17,7 @@ import { stripHtml } from "./text.ts";
 import { embedTexts, resolveEmbedModel } from "./providers/embed.ts";
 import { tokenCounter } from "./tokens.ts";
 import { withOptionalMeteredRequest } from "./quota.ts";
+import { logInteraction } from "./interactions.ts";
 
 export interface EmbedResult {
   chunks_upserted: number;
@@ -49,6 +50,8 @@ export interface EmbedOptions {
    * whole monthly allowance the moment a better chunker or model ships.
    */
   meter?: boolean;
+  /** Why this ran ('content_change' | 'reindex'), recorded for provenance. */
+  reason?: string;
 }
 
 export async function embedNode(
@@ -99,6 +102,7 @@ export async function embedNode(
   if (chunks.length === 0) return { chunks_upserted: 0, skipped: true };
 
   const work = async () => {
+    const t0 = Date.now();
     const inputs = chunks.map((chunk) => `${headerOf(chunk)}${chunk.content}`);
     const { embeddings, inputTokens, model: usedModel, provider } = await embedTexts(config, inputs);
 
@@ -110,8 +114,30 @@ export async function embedNode(
       embedding: embeddings[i] ?? [],
     }));
 
+    const upserted = await replaceChunks(nodeId, rows);
+
+    // Embedding is logged like every other feature so the vector corpus has the
+    // same provenance as the answers: which model, which chunker, why it ran.
+    await logInteraction({
+      userId: owner,
+      feature: "embed",
+      scope: { kind: "nodes", ids: [nodeId] },
+      retrievedNodeIds: [nodeId],
+      model: usedModel,
+      provider,
+      latencyMs: Date.now() - t0,
+      inputTokens,
+      scopeKind: "nodes",
+      payload: {
+        reason: options.reason ?? (options.meter === false ? "reindex" : "content_change"),
+        chunks: upserted,
+        chunk_tokens: rows.map((r) => r.token_count),
+        exact_tokens: counter.exact,
+      },
+    });
+
     return {
-      result: { chunks_upserted: await replaceChunks(nodeId, rows), skipped: false },
+      result: { chunks_upserted: upserted, skipped: false },
       model: usedModel,
       provider,
       inputTokens,

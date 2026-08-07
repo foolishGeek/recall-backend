@@ -73,6 +73,7 @@ Deno.serve(async (req) => {
       // so it must not be charged again.
       const result = await embedNode(item.source_id, config, {
         meter: item.reason !== "reindex",
+        reason: item.reason,
       });
       await complete(item.id, true);
       if (result.skipped) skipped++;
