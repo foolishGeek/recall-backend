@@ -3,7 +3,7 @@
 // fallback). Uses nodeCorpusText so link/YouTube notes without extracted_text
 // still summarize. Truly empty content → 422.
 
-import { adminClient } from "../../_shared/supabase.ts";
+import { adminClient, rowAs } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
 import { truncate } from "../../_shared/text.ts";
@@ -33,9 +33,8 @@ export async function summarize(payload: Record<string, unknown>, userId: string
       .eq("id", nodeId)
       .is("deleted_at", null)
       .maybeSingle();
-    const owner = (node as { buckets?: { user_id?: string } } | null)?.buckets?.user_id;
-    if (!node || owner !== userId) throw new AppError("invalid_input", "node not found");
-    const n = node as NodeRow;
+    const n = rowAs<NodeRow & { buckets?: { user_id?: string } }>(node);
+    if (!n || n.buckets?.user_id !== userId) throw new AppError("invalid_input", "node not found");
     const text = nodeCorpusText({ ...n, id: nodeId });
     if (!text) throw new AppError("empty_context");
     scopeName = n.title ?? "";

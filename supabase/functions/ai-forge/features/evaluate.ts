@@ -4,7 +4,7 @@
 // Standalone URL lines / link_suggestions are preserved so Apply never drops
 // LINKED/WATCH cards.
 
-import { adminClient } from "../../_shared/supabase.ts";
+import { adminClient, rowsAs } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
 import { truncate } from "../../_shared/text.ts";
@@ -104,8 +104,8 @@ export async function evaluate(payload: Record<string, unknown>, userId: string,
     .from("node_tags")
     .select("tags(name)")
     .eq("node_id", nodeId);
-  const tags = (tagRows ?? [])
-    .map((r: { tags?: { name?: string } }) => r.tags?.name)
+  const tags = rowsAs<{ tags?: { name?: string } | null }>(tagRows)
+    .map((r) => r.tags?.name)
     .filter(Boolean)
     .join(", ");
 

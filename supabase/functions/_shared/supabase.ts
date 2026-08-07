@@ -20,3 +20,16 @@ export function adminClient(): SupabaseClient {
   });
   return cached;
 }
+
+// supabase-js infers an embedded relation as an array, so `buckets!inner(name)`
+// is typed `{ name: any }[]` even though a to-one relation returns exactly one
+// object. Every call site that annotates the real shape therefore needs a
+// double cast; these say why once instead of repeating it.
+
+export function rowsAs<T>(data: unknown): T[] {
+  return (data ?? []) as T[];
+}
+
+export function rowAs<T>(data: unknown): T | null {
+  return (data ?? null) as T | null;
+}

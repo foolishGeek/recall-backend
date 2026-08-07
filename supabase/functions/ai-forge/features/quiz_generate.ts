@@ -9,7 +9,7 @@
 // general-knowledge questions on the same topics. by_node/by_bucket use the
 // node corpus so link/YouTube notes without extracted_text still produce a quiz.
 
-import { adminClient } from "../../_shared/supabase.ts";
+import { adminClient, rowsAs } from "../../_shared/supabase.ts";
 import { resolveScope } from "../../_shared/scope.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
@@ -86,16 +86,11 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
         .select(`${CORPUS_FIELDS}, buckets!inner(user_id, name)`)
         .in("id", nodeIds)
         .is("deleted_at", null);
-      const owned = (nodes ?? []).filter(
-        (n: { buckets?: { user_id?: string } }) => n.buckets?.user_id === userId,
-      ) as NodeRow[];
+      const rows = rowsAs<NodeRow & { buckets?: { user_id?: string; name?: string } }>(nodes);
+      const owned = rows.filter((n) => n.buckets?.user_id === userId);
       context = corpusBlocks(owned);
       const bucketNames = [
-        ...new Set(
-          (nodes ?? [])
-            .map((n: { buckets?: { name?: string } }) => n.buckets?.name ?? "")
-            .filter(Boolean),
-        ),
+        ...new Set(rows.map((n) => n.buckets?.name ?? "").filter(Boolean)),
       ];
       scopeLabel = sourceNodeTitles.length
         ? `notes: ${sourceNodeTitles.join(", ")}`
@@ -124,9 +119,8 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
         .order("due_at", { ascending: true, nullsFirst: false })
         .order("priority", { ascending: false })
         .limit(questionCount * 2);
-      const owned = (nodes ?? []).filter(
-        (n: { buckets?: { user_id?: string } }) => n.buckets?.user_id === userId,
-      ) as NodeRow[];
+      const owned = rowsAs<NodeRow & { buckets?: { user_id?: string } }>(nodes)
+        .filter((n) => n.buckets?.user_id === userId);
       context = corpusBlocks(owned);
     }
   } else {
@@ -153,7 +147,9 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
       if (ids.length) {
         const { data: tagRows } = await db.from("node_tags").select("tags(name)").in("node_id", ids);
         tagNames = [...new Set(
-          (tagRows ?? []).map((r: { tags?: { name?: string } }) => r.tags?.name ?? "").filter(Boolean),
+          rowsAs<{ tags?: { name?: string } | null }>(tagRows)
+            .map((r) => r.tags?.name ?? "")
+            .filter(Boolean),
         )];
       }
       topics = [...titles.slice(0, 12), ...tagNames.slice(0, 8)].join(", ");
