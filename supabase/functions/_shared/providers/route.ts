@@ -22,6 +22,7 @@ import {
 import { geminiGenerateJson } from "./gemini.ts";
 import { anthropicGenerateJson } from "./anthropic.ts";
 import { openaiGenerateJson } from "./openai.ts";
+import { selfhostConfigured, selfhostGenerateJson } from "./selfhost.ts";
 
 export type Tier = "free" | "premium";
 
@@ -166,12 +167,25 @@ export function candidatesForTier(config: AppConfig, tier: Tier): Candidate[] {
       model: config.str("ai_model_free", "gemini-1.5-flash"),
     };
 
-  return [primary, {
+  const ladder: Candidate[] = [primary, {
     provider: "openai",
     generate: openaiGenerateJson,
     apiKey: Deno.env.get("OPENAI_API_KEY") ?? "",
     model: config.str("ai_model_fallback", "gpt-4o-mini"),
   }];
+
+  // Optional self-hosted OpenAI-compatible endpoint (vLLM / TGI). Appended so
+  // it only runs after commercial providers fail — never the default path.
+  if (selfhostConfigured()) {
+    ladder.push({
+      provider: "selfhost",
+      generate: selfhostGenerateJson,
+      apiKey: Deno.env.get("AI_SELFHOST_API_KEY") || "not-needed",
+      model: config.str("ai_model_selfhost", "local"),
+    });
+  }
+
+  return ladder;
 }
 
 export function generateJson(
