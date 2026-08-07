@@ -25,11 +25,6 @@ Staging infra remains the daily driver. Recall-prod (`cpyhkjourabizancgkjm`) cut
 
 ## Still pending (not blocking core e2e)
 
-### Sentry `[D-OBS-1]`
-
-- [x] Prod uses the existing (staging) Sentry DSN in `config/prod.json`; events tagged `environment=prod` via `ENV` dart-define
-- [ ] Optional: dedicated `recall-prod` Sentry project + its own DSN
-
 ### Supabase Auth (prod)
 
 - [ ] Google provider: Web client ID + secret in Supabase Auth
@@ -57,4 +52,3 @@ Staging infra remains the daily driver. Recall-prod (`cpyhkjourabizancgkjm`) cut
 ### Flutter
 
 - [x] Prod `--dart-define-from-file=config/prod.json`
-- [ ] Sentry test event on prod flavor (when DSN exists)
