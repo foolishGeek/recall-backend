@@ -15,7 +15,9 @@ import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
 import { truncate } from "../../_shared/text.ts";
 import { nodeCorpusText, NodeRow } from "../../_shared/node_corpus.ts";
-import { retrieve } from "../../_shared/retrieve.ts";
+import { retrieve, RetrieveResult } from "../../_shared/retrieve.ts";
+import { captureRetrieval } from "../../_shared/retrieval_capture.ts";
+import { registerPrompt } from "../../_shared/prompt_registry.ts";
 import { generateQuizQuestions, normalizeQuestions } from "../quiz_json.ts";
 import { withMeteredRequest } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
@@ -59,6 +61,7 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
   let topics = "";
   const retrievedNodeIds = new Set<string>();
   let scopeLabel = "";
+  let retrieved: RetrieveResult | null = null;
   const sourceNodeTitles: string[] = [];
 
   const corpusBlocks = (rows: NodeRow[]): string => {
@@ -155,16 +158,17 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
 
       // Hybrid retrieve over the scope using the prompt + collective topics.
       const query = [prompt, topics].filter(Boolean).join(". ") || "key themes";
-      const found = await retrieve(db, config, {
+      retrieved = await retrieve(db, config, {
         feature: "quiz_generate",
         userId,
         query,
         bucketIds: scopeIds,
         nodeIds: scope.nodeIds,
+        assetIds: scope.assetIds,
       });
-      if (found.context.text) {
-        for (const n of found.context.nodes) retrievedNodeIds.add(n.node_id);
-        context = found.context.text;
+      if (retrieved.context.text) {
+        for (const n of retrieved.context.nodes) retrievedNodeIds.add(n.node_id);
+        context = retrieved.context.text;
       }
     }
 
@@ -194,7 +198,9 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
   // A generation that yields no usable questions throws below, which releases
   // the hold — the user is never charged for a quiz they did not receive.
   return withMeteredRequest({ userId, feature: "quiz_generate" }, async (reservation) => {
-    const system = quizGenerateSystem(questionCount, difficulty, questionType) + (await userDirectives(userId));
+    const baseSystem = quizGenerateSystem(questionCount, difficulty, questionType);
+    const promptRef = await registerPrompt("quiz_generate", baseSystem);
+    const system = baseSystem + (await userDirectives(userId));
     const modeLine = `MODE: ${mode}${scopeLabel ? ` · ${scopeLabel}` : ""}`;
     const notesLine = useMyNotes || mode !== "freehand"
       ? `Ground questions in CONTEXT below. Every question must reflect the selected notes/buckets when content is present.`
@@ -230,7 +236,7 @@ Generate ${questionCount} questions. Respect the requested format above.`;
     }
 
     const hadNotes = context.length > 0;
-    await logInteraction({
+    const interactionId = await logInteraction({
       userId,
       feature: "quiz_generate",
       scope: { mode, bucket_ids: requestedBuckets ?? null, node_ids: requestedNodes ?? null, topics },
@@ -241,8 +247,18 @@ Generate ${questionCount} questions. Respect the requested format above.`;
       latencyMs,
       inputTokens: gen.usage.input_tokens,
       outputTokens: gen.usage.output_tokens,
+      requestId: reservation.requestId,
+      promptId: promptRef.promptId,
+      systemPromptSha: promptRef.sha,
+      temperature: reservation.temperature,
+      maxTokens: reservation.maxTokens,
+      scopeKind: mode === "by_node" ? "nodes" : mode === "by_bucket" ? "buckets" : "active_buckets",
+      retrievalMode: retrieved?.mode ?? "none",
       payload: { prompt, topics, context, question_count: questionCount, question_type: questionType },
     });
+
+    await captureRetrieval(interactionId, retrieved);
+
     return {
       result: { questions, model: gen.model, usage: gen.usage },
       model: gen.model,
