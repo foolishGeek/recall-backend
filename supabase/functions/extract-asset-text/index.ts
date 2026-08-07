@@ -1,6 +1,6 @@
 // extract-asset-text — stub. Verifies the caller owns the asset, then marks
--- parse_status = 'unsupported' until a real extractor lands. Returns JSON so
--- mobile can poll without treating the stub as a hard failure.
+// parse_status = 'unsupported' until a real extractor lands. Returns JSON so
+// mobile can poll without treating the stub as a hard failure.
 
 import { handlePreflight } from "../_shared/cors.ts";
 import { AppError, jsonResponse, toErrorResponse } from "../_shared/errors.ts";
