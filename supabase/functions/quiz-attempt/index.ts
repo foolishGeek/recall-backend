@@ -55,9 +55,7 @@ Deno.serve(async (req) => {
       throw new AppError("invalid_input", "attempt is not in progress");
     }
 
-    const gate = await gateCheck(caller.userId);
-    assertAllowed(gate);
-    if (gate.tier !== "premium") throw new AppError("premium_required");
+    assertAllowed(await gateCheck(caller.userId, "quiz_session"));
 
     const { data: rows, error: rowsErr } = await db
       .from("quiz_question_attempts")
