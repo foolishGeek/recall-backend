@@ -48,8 +48,8 @@ export type GenerateStream = (a: GenerateArgs) => AsyncIterable<StreamChunk>;
  * A provider call that did not produce an answer.
  *
  * `retryable` is what stops us burning a second provider's quota on a mistake
- * that will repeat: a bad API key or a rejected prompt fails the same way
- * everywhere, while a timeout, 429 or 5xx is worth another try elsewhere.
+ * that will repeat: a prompt this large is rejected everywhere, while a
+ * timeout, a 429 or a retired model says something about who we asked.
  */
 export class ProviderError extends Error {
   constructor(
@@ -63,7 +63,23 @@ export class ProviderError extends Error {
   }
 }
 
-/** HTTP statuses worth retrying on a different provider. */
+/**
+ * Faults in the request itself. Another provider would reject these the same
+ * way, so the ladder stops rather than spending a second provider's tokens to
+ * reach the same rejection.
+ */
+const REQUEST_FAULTS = new Set([400, 413, 422]);
+
+/**
+ * Whether the same request is worth sending to the next provider.
+ *
+ * The question is not "was this our fault" but "is this failure about the
+ * provider we just asked". A retired model id (404), a key with no access to it
+ * (401/403), a rate limit or a 5xx are all specific to that provider, and the
+ * next rung of the ladder runs a different model on a different key — which is
+ * the entire reason the fallback exists. Treating a 404 as fatal is how one
+ * provider retiring one model took the whole feature down.
+ */
 export function isRetryableStatus(status: number): boolean {
-  return status === 408 || status === 409 || status === 429 || status >= 500;
+  return !REQUEST_FAULTS.has(status);
 }

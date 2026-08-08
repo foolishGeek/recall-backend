@@ -112,9 +112,9 @@ export async function attempt(
 
 /**
  * Walks the candidates in order, moving on only when a failure is worth
- * retrying elsewhere. A missing key or a rejected prompt fails the same way on
- * every provider, so those stop the ladder immediately instead of spending a
- * second provider's tokens to reach the same answer.
+ * retrying elsewhere. A prompt the model refuses on size or shape fails the
+ * same way everywhere, so that stops the ladder immediately instead of spending
+ * a second provider's tokens to reach the same rejection.
  */
 export async function runLadder(
   candidates: Candidate[],
@@ -164,7 +164,7 @@ export function candidatesForTier(config: AppConfig, tier: Tier): Candidate[] {
       provider: "gemini",
       generate: geminiGenerateJson,
       apiKey: Deno.env.get("GEMINI_API_KEY") ?? "",
-      model: config.str("ai_model_free", "gemini-1.5-flash"),
+      model: config.str("ai_model_free", "gemini-3.1-flash-lite"),
     };
 
   const ladder: Candidate[] = [primary, {
