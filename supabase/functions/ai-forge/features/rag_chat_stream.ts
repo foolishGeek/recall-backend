@@ -7,6 +7,9 @@
 // along inside JSON, so they arrive as a trailer the reader never sees
 // (stream_trailer.ts) and are replayed in the closing `done` event.
 //
+// The conversation id is minted before the first token so a Stop mid-stream
+// still leaves the client on the same thread for the next question.
+//
 // The user is charged when an answer is delivered. A provider that fails before
 // the first token releases the hold and falls through to the next provider; one
 // that fails after it keeps the partial answer, saves it, and settles — the user
@@ -28,6 +31,7 @@ import { RAG_STREAM_SYSTEM } from "../prompts.ts";
 import {
   buildUserPrompt,
   CitationNode,
+  createConversation,
   finishTurn,
   prepareChat,
   PreparedChat,
@@ -47,6 +51,15 @@ export async function ragChatStream(
   const hold = await openMeteredRequest(prepared.meter);
   if (hold.replay !== undefined) return replayResponse(hold.replay);
 
+  // Mint the thread before tokens so a mid-stream Stop still has a conversation
+  // id the client can keep using. finishTurn reuses prepared.conversationId.
+  if (!prepared.conversationId) {
+    prepared.conversationId = await createConversation(prepared.db, userId, {
+      bucket_ids: prepared.requestedBuckets,
+      node_ids: prepared.requestedNodes,
+    });
+  }
+
   const system = RAG_STREAM_SYSTEM + (await userDirectives(userId));
   const sources = prepared.ctx.nodes;
   const userPrompt = buildUserPrompt(
@@ -55,7 +68,10 @@ export async function ragChatStream(
   );
 
   return sseResponse(async (emit, streamSignal) => {
-    emit("open", { notes: sources.length });
+    emit("open", {
+      notes: sources.length,
+      conversation_id: prepared.conversationId,
+    });
 
     const trailer = new CitationTrailer();
     const stream = streamText(config, prepared.tier, system, userPrompt, {
@@ -66,6 +82,7 @@ export async function ragChatStream(
 
     let answer = "";
     const t0 = Date.now();
+    let truncated = false;
     let failure: unknown = null;
     let model = "";
     let provider = "";
@@ -80,6 +97,7 @@ export async function ragChatStream(
           model = step.value.model;
           provider = step.value.provider;
           usage = step.value.usage;
+          truncated = step.value.truncated === true;
           break;
         }
         const safe = trailer.push(step.value);
@@ -110,24 +128,27 @@ export async function ragChatStream(
     const saved = await persist(prepared, hold, {
       answer,
       citations,
-      model,
-      provider,
+      model: model || "unknown",
+      provider: provider || "unknown",
       usage,
       latencyMs,
       promptId: prompt.promptId,
       systemPromptSha: prompt.sha,
     });
 
-    if (failure) {
+    if (failure || truncated) {
       // A truncated answer is still an answer, but the reader deserves to know
       // it stopped early rather than being left mid-sentence.
-      emit("error", { ...errorPayload(failure), partial: true });
+      emit("error", {
+        ...errorPayload(failure ?? new AppError("provider_error", "The answer stopped early.")),
+        partial: true,
+      });
     }
 
     emit("done", {
       answer,
       citations,
-      model,
+      model: model || null,
       usage,
       interaction_id: saved.interactionId,
       conversation_id: saved.conversationId,
@@ -203,7 +224,10 @@ function replayResponse(cached: unknown): Response {
   const body = (cached ?? {}) as Record<string, unknown>;
   const answer = typeof body.answer === "string" ? body.answer : "";
   return sseResponse((emit) => {
-    emit("open", { notes: Array.isArray(body.citations) ? body.citations.length : 0 });
+    emit("open", {
+      notes: Array.isArray(body.citations) ? body.citations.length : 0,
+      conversation_id: body.conversation_id ?? null,
+    });
     if (answer) emit("delta", { t: answer });
     emit("done", body);
     return Promise.resolve();

@@ -156,6 +156,8 @@ export interface StreamOutcome {
   model: string;
   provider: string;
   usage: Usage;
+  /** True when the reader already saw tokens and the stream then stopped. */
+  truncated?: boolean;
 }
 
 /**
@@ -166,7 +168,8 @@ export interface StreamOutcome {
  * replaced while nothing has been sent to the reader yet. Once the user has seen
  * a sentence, switching providers would append a second, unrelated answer to a
  * half-finished one — worse than an honest error, so from the first delta a
- * failure ends the stream.
+ * failure ends the stream. If tokens were already emitted, we still return the
+ * provider that wrote them so the ledger is not left blank.
  */
 export async function* streamLadder(
   candidates: Candidate[],
@@ -209,8 +212,18 @@ export async function* streamLadder(
       return { model: candidate.model, provider: candidate.provider, usage };
     } catch (err) {
       last = err;
+      if (emitted) {
+        // Partial answer the user already saw — settle against this provider,
+        // do not burn the next rung, and let the caller mark it truncated.
+        return {
+          model: candidate.model,
+          provider: candidate.provider,
+          usage,
+          truncated: true,
+        };
+      }
       const retryable = err instanceof ProviderError ? err.retryable : false;
-      if (emitted || !retryable) break;
+      if (!retryable) break;
       console.error(
         `provider ${candidate.provider} failed before first token, trying next:`,
         (err as Error).message,

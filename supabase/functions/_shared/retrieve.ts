@@ -83,14 +83,17 @@ export async function retrieve(
   let mode: RetrievalMode = "none";
 
   if (qEmbedding || req.query.trim()) {
+    // Postgres treats ANY('{}') as match-nothing. Empty arrays must become NULL
+    // ("no filter"), or a node-only Ask AI silently gets zero hybrid hits and
+    // falls back to a weaker corpus sample.
     const { data, error } = await db.rpc("match_chunks_hybrid_v2", {
       query_embedding: qEmbedding ? JSON.stringify(qEmbedding) : null,
       query_text: req.query,
       match_user_id: req.userId,
       match_count: retrieveK,
       match_threshold: threshold,
-      filter_bucket_ids: req.bucketIds,
-      filter_node_ids: req.nodeIds,
+      filter_bucket_ids: req.bucketIds?.length ? req.bucketIds : null,
+      filter_node_ids: req.nodeIds?.length ? req.nodeIds : null,
       filter_source_kinds: sourceKinds,
       filter_asset_ids: assetIds,
       embed_model: config.str("ai_model_embed", "text-embedding-3-small"),

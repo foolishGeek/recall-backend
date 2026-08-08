@@ -282,7 +282,7 @@ async function resolveConversation(
   return (data?.id as string | undefined) ?? null;
 }
 
-async function createConversation(
+export async function createConversation(
   db: Db,
   userId: string,
   scope: Record<string, unknown>,
