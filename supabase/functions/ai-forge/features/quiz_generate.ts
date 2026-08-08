@@ -9,15 +9,17 @@
 // general-knowledge questions on the same topics. by_node/by_bucket use the
 // node corpus so link/YouTube notes without extracted_text still produce a quiz.
 
-import { adminClient } from "../../_shared/supabase.ts";
+import { adminClient, rowsAs } from "../../_shared/supabase.ts";
+import { resolveScope } from "../../_shared/scope.ts";
 import { AppConfig } from "../../_shared/config.ts";
 import { AppError } from "../../_shared/errors.ts";
 import { truncate } from "../../_shared/text.ts";
-import { formatContext, RetrievedChunk } from "../../_shared/context.ts";
 import { nodeCorpusText, NodeRow } from "../../_shared/node_corpus.ts";
-import { openaiEmbed } from "../../_shared/providers/openai.ts";
+import { retrieve, RetrieveResult } from "../../_shared/retrieve.ts";
+import { captureRetrieval } from "../../_shared/retrieval_capture.ts";
+import { registerPrompt } from "../../_shared/prompt_registry.ts";
 import { generateQuizQuestions, normalizeQuestions } from "../quiz_json.ts";
-import { gateConsume, assertAllowed, logUsage } from "../../_shared/quota.ts";
+import { withMeteredRequest } from "../../_shared/quota.ts";
 import { logInteraction } from "../../_shared/interactions.ts";
 import { userDirectives } from "../../_shared/user_prefs.ts";
 import { webContext } from "../../_shared/web_context.ts";
@@ -59,6 +61,7 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
   let topics = "";
   const retrievedNodeIds = new Set<string>();
   let scopeLabel = "";
+  let retrieved: RetrieveResult | null = null;
   const sourceNodeTitles: string[] = [];
 
   const corpusBlocks = (rows: NodeRow[]): string => {
@@ -85,16 +88,11 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
         .select(`${CORPUS_FIELDS}, buckets!inner(user_id, name)`)
         .in("id", nodeIds)
         .is("deleted_at", null);
-      const owned = (nodes ?? []).filter(
-        (n: { buckets?: { user_id?: string } }) => n.buckets?.user_id === userId,
-      ) as NodeRow[];
+      const rows = rowsAs<NodeRow & { buckets?: { user_id?: string; name?: string } }>(nodes);
+      const owned = rows.filter((n) => n.buckets?.user_id === userId);
       context = corpusBlocks(owned);
       const bucketNames = [
-        ...new Set(
-          (nodes ?? [])
-            .map((n: { buckets?: { name?: string } }) => n.buckets?.name ?? "")
-            .filter(Boolean),
-        ),
+        ...new Set(rows.map((n) => n.buckets?.name ?? "").filter(Boolean)),
       ];
       scopeLabel = sourceNodeTitles.length
         ? `notes: ${sourceNodeTitles.join(", ")}`
@@ -123,17 +121,17 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
         .order("due_at", { ascending: true, nullsFirst: false })
         .order("priority", { ascending: false })
         .limit(questionCount * 2);
-      const owned = (nodes ?? []).filter(
-        (n: { buckets?: { user_id?: string } }) => n.buckets?.user_id === userId,
-      ) as NodeRow[];
+      const owned = rowsAs<NodeRow & { buckets?: { user_id?: string } }>(nodes)
+        .filter((n) => n.buckets?.user_id === userId);
       context = corpusBlocks(owned);
     }
   } else {
     // freehand — derive collective topics from the chosen scope, then RAG.
-    const { data: activeRows } = await db.rpc("active_buckets_for_user", { uid: userId });
-    const activeIds: string[] = (activeRows ?? []).map((b: { id: string }) => b.id);
-    let scopeIds = activeIds;
-    if (requestedBuckets?.length) scopeIds = activeIds.filter((id) => requestedBuckets.includes(id));
+    const scope = await resolveScope(db, userId, {
+      bucketIds: requestedBuckets?.length ? requestedBuckets : null,
+      nodeIds: requestedNodes,
+    });
+    const scopeIds = scope.bucketIds;
 
     if (useMyNotes && scopeIds.length) {
       // Collective topics: titles + tags across the scope (capped).
@@ -151,40 +149,26 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
       if (ids.length) {
         const { data: tagRows } = await db.from("node_tags").select("tags(name)").in("node_id", ids);
         tagNames = [...new Set(
-          (tagRows ?? []).map((r: { tags?: { name?: string } }) => r.tags?.name ?? "").filter(Boolean),
+          rowsAs<{ tags?: { name?: string } | null }>(tagRows)
+            .map((r) => r.tags?.name ?? "")
+            .filter(Boolean),
         )];
       }
       topics = [...titles.slice(0, 12), ...tagNames.slice(0, 8)].join(", ");
 
-      // RAG over the scope using the prompt + collective topics as the query.
-      const embedModel = config.str("ai_model_embed", "text-embedding-3-small");
-      const openaiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
+      // Hybrid retrieve over the scope using the prompt + collective topics.
       const query = [prompt, topics].filter(Boolean).join(". ") || "key themes";
-      const { embeddings } = await openaiEmbed(openaiKey, embedModel, [query]);
-      const { data: matches } = await db.rpc("match_chunks", {
-        query_embedding: JSON.stringify(embeddings[0] ?? []),
-        match_user_id: userId,
-        match_count: config.int("ai_rag_top_k", 8),
-        match_threshold: config.num("ai_rag_similarity_threshold", 0.7),
-        filter_bucket_ids: scopeIds,
-        filter_node_ids: requestedNodes,
+      retrieved = await retrieve(db, config, {
+        feature: "quiz_generate",
+        userId,
+        query,
+        bucketIds: scopeIds,
+        nodeIds: scope.nodeIds,
+        assetIds: scope.assetIds,
       });
-      const rows = (matches ?? []) as { node_id: string; content: string; similarity: number }[];
-      if (rows.length) {
-        for (const r of rows) retrievedNodeIds.add(r.node_id);
-        const retrieved: RetrievedChunk[] = rows.map((r) => ({
-          node_id: r.node_id,
-          title: "",
-          content: r.content,
-          similarity: r.similarity,
-        }));
-        context = formatContext(retrieved, maxChars).text;
-      } else {
-        // No embedded chunks yet → corpus fallback over the scope.
-        let q = db.from("nodes").select(CORPUS_FIELDS).in("bucket_id", scopeIds).is("deleted_at", null).limit(20);
-        if (requestedNodes?.length) q = q.in("id", requestedNodes);
-        const { data: nodeRows } = await q;
-        context = corpusBlocks((nodeRows ?? []) as NodeRow[]);
+      if (retrieved.context.text) {
+        for (const n of retrieved.context.nodes) retrievedNodeIds.add(n.node_id);
+        context = retrieved.context.text;
       }
     }
 
@@ -211,15 +195,17 @@ export async function quizGenerate(payload: Record<string, unknown>, userId: str
     );
   }
 
-  const decision = await gateConsume(userId, "quiz_generate");
-  assertAllowed(decision);
-
-  const system = quizGenerateSystem(questionCount, difficulty, questionType) + (await userDirectives(userId));
-  const modeLine = `MODE: ${mode}${scopeLabel ? ` · ${scopeLabel}` : ""}`;
-  const notesLine = useMyNotes || mode !== "freehand"
-    ? `Ground questions in CONTEXT below. Every question must reflect the selected notes/buckets when content is present.`
-    : `CONTEXT is optional; lean on the USER PROMPT and general knowledge.`;
-  const userPrompt = `${modeLine}
+  // A generation that yields no usable questions throws below, which releases
+  // the hold — the user is never charged for a quiz they did not receive.
+  return withMeteredRequest({ userId, feature: "quiz_generate" }, async (reservation) => {
+    const baseSystem = quizGenerateSystem(questionCount, difficulty, questionType);
+    const promptRef = await registerPrompt("quiz_generate", baseSystem);
+    const system = baseSystem + (await userDirectives(userId));
+    const modeLine = `MODE: ${mode}${scopeLabel ? ` · ${scopeLabel}` : ""}`;
+    const notesLine = useMyNotes || mode !== "freehand"
+      ? `Ground questions in CONTEXT below. Every question must reflect the selected notes/buckets when content is present.`
+      : `CONTEXT is optional; lean on the USER PROMPT and general knowledge.`;
+    const userPrompt = `${modeLine}
 ${notesLine}
 TOPICS: ${topics || "(from prompt and notes)"}
 QUESTION FORMAT: ${typeLabel(questionType)} · exactly ${questionCount} questions · difficulty ${difficulty}/5
@@ -230,38 +216,54 @@ ${context || "(no notes provided)"}
 USER PROMPT${mode === "freehand" ? "" : " (ignored for this mode)"}: ${prompt || "(none)"}
 
 Generate ${questionCount} questions. Respect the requested format above.`;
-  const t0 = Date.now();
-  const gen = await generateQuizQuestions({
-    config,
-    system,
-    userPrompt,
-    questionCount,
-    questionType,
-  });
-  const latencyMs = Date.now() - t0;
+    const t0 = Date.now();
+    const gen = await generateQuizQuestions({
+      config,
+      system,
+      userPrompt,
+      questionCount,
+      questionType,
+      temperature: reservation.temperature,
+    });
+    const latencyMs = Date.now() - t0;
 
-  const questions = normalizeQuestions({ questions: gen.questions });
-  if (!questions.length) {
-    throw new AppError(
-      "provider_error",
-      "No quiz questions were generated. Try fewer questions or add more note content.",
-    );
-  }
+    const questions = normalizeQuestions({ questions: gen.questions });
+    if (!questions.length) {
+      throw new AppError(
+        "provider_error",
+        "No quiz questions were generated. Try fewer questions or add more note content.",
+      );
+    }
 
-  await logUsage(userId, "quiz_generate", gen.usage.input_tokens, gen.usage.output_tokens, gen.model);
-  const hadNotes = context.length > 0;
-  await logInteraction({
-    userId,
-    feature: "quiz_generate",
-    scope: { mode, bucket_ids: requestedBuckets ?? null, node_ids: requestedNodes ?? null, topics },
-    retrievedNodeIds: [...retrievedNodeIds],
-    hadNotes,
-    blend: hadNotes ? "blended" : "general_only",
-    model: gen.model,
-    latencyMs,
-    inputTokens: gen.usage.input_tokens,
-    outputTokens: gen.usage.output_tokens,
-    payload: { prompt, topics, context, question_count: questionCount, question_type: questionType },
+    const hadNotes = context.length > 0;
+    const interactionId = await logInteraction({
+      userId,
+      feature: "quiz_generate",
+      scope: { mode, bucket_ids: requestedBuckets ?? null, node_ids: requestedNodes ?? null, topics },
+      retrievedNodeIds: [...retrievedNodeIds],
+      hadNotes,
+      blend: hadNotes ? "blended" : "general_only",
+      model: gen.model,
+      latencyMs,
+      inputTokens: gen.usage.input_tokens,
+      outputTokens: gen.usage.output_tokens,
+      requestId: reservation.requestId,
+      promptId: promptRef.promptId,
+      systemPromptSha: promptRef.sha,
+      temperature: reservation.temperature,
+      maxTokens: reservation.maxTokens,
+      scopeKind: mode === "by_node" ? "nodes" : mode === "by_bucket" ? "buckets" : "active_buckets",
+      retrievalMode: retrieved?.mode ?? "none",
+      payload: { prompt, topics, context, question_count: questionCount, question_type: questionType },
+    });
+
+    await captureRetrieval(interactionId, retrieved);
+
+    return {
+      result: { questions, model: gen.model, usage: gen.usage },
+      model: gen.model,
+      inputTokens: gen.usage.input_tokens,
+      outputTokens: gen.usage.output_tokens,
+    };
   });
-  return { questions, model: gen.model, usage: gen.usage };
 }

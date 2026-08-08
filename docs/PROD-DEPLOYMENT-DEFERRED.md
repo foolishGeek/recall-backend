@@ -13,10 +13,11 @@ Staging infra remains the daily driver. Recall-prod (`cpyhkjourabizancgkjm`) cut
 - [x] Auth site URL + redirect (`app.recall://login-callback`); email OTP
 - [x] Send Email Auth Hook → `auth-send-email` (SMTP2GO, same mailbox as staging)
 - [x] Brand assets in public `brand-assets` Storage bucket
-- [x] Migrations `00001`–`00059` applied (engine-ux-overhaul through ASAO Reminder style / `drop_intensity` threshold 1; auto-tune & per-user weights ship behind default-off kill-switches); real `app_config` limits (50 AI / 2 overviews / session 8 / drop budgets)
+- [x] Migrations `00001`–`00075` applied (AI policy/ledger through conversations, hybrid retrieval, scope/chunk_embeddings, capture spine, training example shape, per-source citation labels, free model on gemini-3.1-flash-lite, nullable `nodes.bucket_id`)
+- [x] AI caps come from `ai_feature_policy` / `v_ai_policy`, keyed on `app_config.limits_profile` (live value: `relaxed`)
 - [x] Vault: `app_supabase_url`, `app_service_role_key`, `app_cron_secret`
-- [x] Cron jobs: `compute-due-5min`, `cleanup-exports-hourly`, `onboarding-emails-2min`
-- [x] All 15 Edge Functions deployed
+- [x] Cron jobs: `compute-due-5min`, `cleanup-exports-hourly`, `onboarding-emails-2min`, `prune-device-tokens-daily`, `embed-drain-every-minute`, `ai-sweep-stale-requests`, `ai-redact-expired`
+- [x] Edge Functions deployed including `ai-forge`, `embed-drain`, `extract-asset-text`, `dataset-export`, quiz + retention stubs
 - [x] EF secrets: AI keys, `CRON_SECRET`, SMTP2GO, Zoho, FCM (prod SA), Send Email hook, RC webhook placeholder
 - [x] Firebase `recall-spaced-prod`; `google-services.prod.json` + `fcm-service-account.prod.json` in vault
 - [x] Flutter `config/prod.example.json` + local `config/prod.json` (gitignored)

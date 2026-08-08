@@ -1,7 +1,17 @@
-// Loads app_config once per invocation and exposes typed getters. Keys mirror
-// Roadmap/sprints/AI-PROMPTS.md "Global constants" + CANON [D-SCHEMA-9].
+// Typed access to app_config. Keys mirror Roadmap/sprints/AI-PROMPTS.md
+// "Global constants" + CANON [D-SCHEMA-9].
+//
+// Cached for [TTL_MS] per warm isolate: this table is read on every AI request
+// but changes only when someone edits it, so a fresh SELECT each time is a
+// round trip on the critical path for nothing. The TTL is what bounds how long
+// a config change takes to reach traffic — keep it short.
 
 import { adminClient } from "./supabase.ts";
+
+const TTL_MS = 60_000;
+
+let cache: { config: AppConfig; loadedAt: number } | null = null;
+let inFlight: Promise<AppConfig> | null = null;
 
 export class AppConfig {
   private map: Record<string, unknown>;
@@ -10,11 +20,29 @@ export class AppConfig {
   }
 
   static async load(): Promise<AppConfig> {
-    const { data, error } = await adminClient().from("app_config").select("key, value");
-    if (error) throw error;
-    const map: Record<string, unknown> = {};
-    for (const row of data ?? []) map[row.key as string] = row.value;
-    return new AppConfig(map);
+    if (cache && Date.now() - cache.loadedAt < TTL_MS) return cache.config;
+    // Concurrent requests in a warm isolate share one refresh.
+    if (inFlight) return inFlight;
+
+    inFlight = (async () => {
+      const { data, error } = await adminClient().from("app_config").select("key, value");
+      if (error) {
+        // A blip should not take AI down when we already have a usable copy.
+        if (cache) return cache.config;
+        throw error;
+      }
+      const map: Record<string, unknown> = {};
+      for (const row of data ?? []) map[row.key as string] = row.value;
+      const config = new AppConfig(map);
+      cache = { config, loadedAt: Date.now() };
+      return config;
+    })();
+
+    try {
+      return await inFlight;
+    } finally {
+      inFlight = null;
+    }
   }
 
   int(key: string, fallback: number): number {

@@ -11,7 +11,6 @@ import { handlePreflight } from "../_shared/cors.ts";
 import { resolveCaller } from "../_shared/auth.ts";
 import { AppError, jsonResponse, toErrorResponse } from "../_shared/errors.ts";
 import { assertAllowed, gateCheck } from "../_shared/quota.ts";
-import { assertPremiumAccess } from "../_shared/premium.ts";
 import { adminClient } from "../_shared/supabase.ts";
 
 Deno.serve(async (req) => {
@@ -24,11 +23,9 @@ Deno.serve(async (req) => {
     const caller = resolveCaller(req);
     if (!caller.userId) throw new AppError("unauthorized");
 
-    // Blocks maintenance / kill-switch; premium check follows.
-    const gate = await gateCheck(caller.userId);
-    assertAllowed(gate);
-
-    await assertPremiumAccess(gate.tier);
+    // Maintenance, kill-switch and the premium requirement all come from the
+    // retention_simulate policy row (relaxed opens it to everyone).
+    assertAllowed(await gateCheck(caller.userId, "retention_simulate"));
 
     const db = adminClient();
     const { data: result, error: rpcErr } = await db.rpc("retention_simulate_rpc", {

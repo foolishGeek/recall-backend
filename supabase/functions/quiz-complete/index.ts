@@ -107,9 +107,7 @@ Deno.serve(async (req) => {
     }
 
     // Quiz is premium-only; the gate also blocks maintenance/downgrade.
-    const gate = await gateCheck(caller.userId);
-    assertAllowed(gate);
-    if (gate.tier !== "premium") throw new AppError("premium_required");
+    assertAllowed(await gateCheck(caller.userId, "quiz_session"));
 
     // Only an in-progress attempt needs grading work; a completed attempt just
     // re-reads its results below (idempotent retry).

@@ -1,0 +1,3 @@
+comment = 'Local test double for Supabase pg_net'
+default_version = '0.1'
+relocatable = false

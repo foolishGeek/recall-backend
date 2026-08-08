@@ -41,9 +41,7 @@ Deno.serve(async (req) => {
     const quizConfig = config as QuizConfigRow;
     if (quizConfig.user_id !== caller.userId) throw new AppError("unauthorized");
 
-    const gate = await gateCheck(caller.userId);
-    assertAllowed(gate);
-    if (gate.tier !== "premium") throw new AppError("premium_required");
+    assertAllowed(await gateCheck(caller.userId, "quiz_generate"));
 
     const appConfig = await AppConfig.load();
     const generated = await quizGenerate(
