@@ -1,16 +1,13 @@
 // What content an AI request is allowed to look at.
 //
-// Today every scope bottoms out in "buckets the user has active", but the app
-// is heading towards notes that belong to no bucket, single-note chats, and
-// attachments searched in their own space. So features ask for a [ResolvedScope]
-// instead of juggling bucket id arrays: when those sources land, this resolver
-// and match_chunks change, and the feature handlers do not.
+// Features ask for a [ResolvedScope] instead of juggling bucket id arrays:
+// when notes without a bucket, single-note chats, or attachment spaces land,
+// this resolver and match_chunks change — the feature handlers do not.
 //
-// It also removes a real inconsistency — rag_chat treated `bucket_ids: []` as
-// "no scope" while quiz_generate treated it as "all active buckets".
-//
-// Accepts both the legacy { bucketIds, nodeIds } shape and the new
-// { scope: { kind, ids } } descriptor via shimScopeRequest.
+// Explicit bucket ids mean "these buckets I own", not "these among my active
+// stack". Asking Aura from a cooling bucket must still read that bucket's notes.
+// The default (no ids) stays the active set, which is what a global Ask Aura
+// without a scope means.
 
 import { SupabaseClient } from "./supabase.ts";
 
@@ -38,7 +35,7 @@ export interface ScopeRequest {
 
 export interface ResolvedScope {
   kind: ScopeKind;
-  /** Bucket ids to search. Always a subset of the user's active buckets. */
+  /** Bucket ids to search. Owned by the user; may be empty. */
   bucketIds: string[];
   /** Node filter for match_chunks, or null for "any node in scope". */
   nodeIds: string[] | null;
@@ -100,27 +97,22 @@ export function shimScopeRequest(raw: Record<string, unknown> | ScopeRequest): S
 }
 
 /**
- * Intersects the caller's request with the buckets the user actually has
- * active, so a client can never widen its own scope by sending extra ids.
+ * Resolves the caller's request into a search scope.
+ *
+ * - No bucket ids → active stack (the default Ask Aura surface).
+ * - Explicit bucket ids → those buckets the user owns, even if cooling.
+ * - Empty array → empty scope (honoured, never widened).
+ * - Node / asset ids are ownership-checked separately so a client cannot
+ *   widen into someone else's notes by guessing uuids.
  */
 export async function resolveScope(
   db: SupabaseClient,
   userId: string,
   request: ScopeRequest = {},
 ): Promise<ResolvedScope> {
-  const { data, error } = await db.rpc("active_buckets_for_user", { uid: userId });
-  if (error) throw error;
-
-  const activeIds: string[] = (data ?? []).map((b: { id: string }) => b.id);
   const requested = request.bucketIds;
   const nodeIds = request.nodeIds?.length ? request.nodeIds : null;
   const assetIds = request.assetIds?.length ? request.assetIds : null;
-
-  // An explicit empty array is a real answer ("nothing selected"), so it is
-  // honoured rather than silently widened to every active bucket.
-  const bucketIds = requested == null
-    ? activeIds
-    : activeIds.filter((id) => requested.includes(id));
 
   let kind: ScopeKind = request.scope?.kind ?? "active_buckets";
   if (!request.scope) {
@@ -129,11 +121,66 @@ export async function resolveScope(
     else if (requested != null) kind = "buckets";
   }
 
+  let bucketIds: string[] = [];
+  if (kind === "assets" || kind === "nodes") {
+    bucketIds = [];
+  } else if (requested == null) {
+    const { data, error } = await db.rpc("active_buckets_for_user", { uid: userId });
+    if (error) throw error;
+    bucketIds = (data ?? []).map((b: { id: string }) => b.id);
+  } else if (requested.length === 0) {
+    bucketIds = [];
+  } else {
+    // Owned buckets only — not "owned and currently active". Asking from a
+    // cooling bucket must still confine to that bucket's notes, not silently
+    // empty or widen to the active set.
+    const { data, error } = await db
+      .from("buckets")
+      .select("id")
+      .eq("user_id", userId)
+      .is("deleted_at", null)
+      .in("id", requested);
+    if (error) throw error;
+    bucketIds = (data ?? []).map((b: { id: string }) => b.id);
+  }
+
+  // Node scope: drop ids the user does not own. Without this, service-role
+  // retrieval would happily read another account's note into the prompt.
+  let ownedNodes = nodeIds;
+  if (nodeIds) {
+    const { data, error } = await db
+      .from("nodes")
+      .select("id")
+      .eq("user_id", userId)
+      .is("deleted_at", null)
+      .in("id", nodeIds);
+    if (error) throw error;
+    ownedNodes = (data ?? []).map((n: { id: string }) => n.id);
+  }
+
+  // Asset scope: same ownership check via the parent note.
+  let ownedAssets = assetIds;
+  if (assetIds) {
+    const { data, error } = await db
+      .from("node_assets")
+      .select("id, nodes!inner(user_id)")
+      .in("id", assetIds)
+      .eq("nodes.user_id", userId);
+    if (error) throw error;
+    ownedAssets = (data ?? []).map((a: { id: string }) => a.id);
+  }
+
   const isEmpty = kind === "assets"
-    ? !assetIds?.length
+    ? !ownedAssets?.length
     : kind === "nodes"
-    ? !nodeIds?.length
+    ? !ownedNodes?.length
     : bucketIds.length === 0;
 
-  return { kind, bucketIds, nodeIds, assetIds, isEmpty };
+  return {
+    kind,
+    bucketIds,
+    nodeIds: ownedNodes,
+    assetIds: ownedAssets,
+    isEmpty,
+  };
 }
