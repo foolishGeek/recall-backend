@@ -109,5 +109,21 @@ for t in "$PGTEST"/[1-9]*.sql "$PGTEST"/[1-9]*.sh; do
   esac
 done
 
+# --- edge function checks -------------------------------------------------
+# The pure-TypeScript pieces with no database to test them against: chunking,
+# context packing, the SSE reader and the citation trailer. Skipped rather than
+# failed when Deno is absent, so this stays a one-command check either way.
+if command -v deno >/dev/null 2>&1; then
+  for v in "$REPO_ROOT"/tool/*_verify.ts; do
+    echo
+    log "running $(basename "$v")"
+    (cd "$REPO_ROOT" && deno run --allow-read "$v") \
+      || { log "FAILED $(basename "$v")"; exit 1; }
+  done
+else
+  echo
+  log "deno not found — skipping the TypeScript verifiers"
+fi
+
 echo
 log "migrations applied and all behaviour tests passed"

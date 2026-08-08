@@ -9,6 +9,7 @@ import { resolveCaller } from "../_shared/auth.ts";
 import { AppConfig } from "../_shared/config.ts";
 import { embed } from "./features/embed.ts";
 import { ragChat } from "./features/rag_chat.ts";
+import { ragChatStream } from "./features/rag_chat_stream.ts";
 import { summarize } from "./features/summarize.ts";
 import { evaluate } from "./features/evaluate.ts";
 import { quizGenerate } from "./features/quiz_generate.ts";
@@ -42,6 +43,10 @@ Deno.serve(async (req) => {
         return jsonResponse(await embed(payload, config));
       case "rag_chat":
         return jsonResponse(await ragChat(payload, requireUser(), config));
+      // The only feature that answers with a stream. Anything it decides before
+      // the first byte still throws, so denials keep their JSON error shape.
+      case "rag_chat_stream":
+        return await ragChatStream(payload, requireUser(), config, req.signal);
       case "summarize":
         return jsonResponse(await summarize(payload, requireUser(), config));
       case "evaluate":

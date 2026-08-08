@@ -21,6 +21,28 @@ Answer the user's QUESTION like a knowledgeable, encouraging tutor.
 Prefer short paragraphs. Max 400 words.
 Output JSON only: { "answer": "string", "cited_node_ids": ["uuid"] }`;
 
+/**
+ * Same answer policy as RAG_SYSTEM, but written to be read as it arrives.
+ *
+ * JSON is the wrong container for a streamed reply — it is unreadable until the
+ * closing brace — so the answer is plain markdown and the citations follow it as
+ * a one-line trailer the client never sees. Sources are cited by number because
+ * a small model echoing a UUID gets it wrong often enough to matter, and a wrong
+ * id is a chip that opens the wrong note.
+ */
+export const RAG_STREAM_SYSTEM = `${BASE_SYSTEM}
+
+Answer the user's QUESTION like a knowledgeable, encouraging tutor.
+- Lead with what the user's CONTEXT (their notes) supports.
+- You MAY add helpful general knowledge to fill gaps or give background, but keep it clearly separate from their notes (for example, start such a sentence with "More broadly,"). Do not invent details about the user's own notes.
+- If CONTEXT has nothing relevant, still help using general knowledge, and gently note that it is not from their saved notes yet.
+- Write the answer as plain Markdown prose. No JSON, no code fences around the whole answer.
+Prefer short paragraphs. Max 400 words.
+
+After the answer, output nothing but one final line listing the SOURCES numbers you actually used:
+<<<CITES: 1, 3>>>
+Use <<<CITES: >>> when you relied on general knowledge. Never mention this line or its numbers in the answer itself.`;
+
 // Retained for back-compat; the blended policy means rag_chat no longer
 // short-circuits an empty corpus with this fixed string.
 export const RAG_EMPTY_REPLY =

@@ -19,10 +19,10 @@ import {
   Sampling,
   Usage,
 } from "./types.ts";
-import { geminiGenerateJson } from "./gemini.ts";
-import { anthropicGenerateJson } from "./anthropic.ts";
-import { openaiGenerateJson } from "./openai.ts";
-import { selfhostConfigured, selfhostGenerateJson } from "./selfhost.ts";
+import { geminiGenerateJson, geminiStreamText } from "./gemini.ts";
+import { anthropicGenerateJson, anthropicStreamText } from "./anthropic.ts";
+import { openaiGenerateJson, openaiStreamText } from "./openai.ts";
+import { selfhostConfigured, selfhostGenerateJson, selfhostStreamText } from "./selfhost.ts";
 
 export type Tier = "free" | "premium";
 
@@ -151,18 +151,93 @@ export async function runLadder(
   );
 }
 
+/** What a completed stream reports back, for the ledger and the capture spine. */
+export interface StreamOutcome {
+  model: string;
+  provider: string;
+  usage: Usage;
+}
+
+/**
+ * Walks the ladder yielding text deltas, and reports which provider produced
+ * them once it is done.
+ *
+ * The fail-over rule is stricter than the buffered one: a provider can only be
+ * replaced while nothing has been sent to the reader yet. Once the user has seen
+ * a sentence, switching providers would append a second, unrelated answer to a
+ * half-finished one — worse than an honest error, so from the first delta a
+ * failure ends the stream.
+ */
+export async function* streamLadder(
+  candidates: Candidate[],
+  system: string,
+  user: string,
+  opts: AttemptOptions = {},
+): AsyncGenerator<string, StreamOutcome> {
+  const usable = candidates.filter((c) => c.apiKey && c.stream);
+  if (usable.length === 0) {
+    throw new AppError("provider_error", "No AI provider can stream.");
+  }
+
+  let last: unknown;
+  for (const candidate of usable) {
+    let emitted = false;
+    let usage: Usage = { input_tokens: 0, output_tokens: 0 };
+    try {
+      for await (const chunk of candidate.stream!({
+        system,
+        user,
+        apiKey: candidate.apiKey,
+        model: candidate.model,
+        temperature: opts.temperature,
+        maxTokens: opts.maxTokens,
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs,
+      })) {
+        if (chunk.usage) usage = chunk.usage;
+        if (!chunk.delta) continue;
+        emitted = true;
+        yield chunk.delta;
+      }
+
+      // A stream that ends without a single token is a failure dressed as a
+      // success: the reader would be left with an empty bubble.
+      if (!emitted) {
+        throw new ProviderError(candidate.provider, null, true, "Empty stream.");
+      }
+
+      return { model: candidate.model, provider: candidate.provider, usage };
+    } catch (err) {
+      last = err;
+      const retryable = err instanceof ProviderError ? err.retryable : false;
+      if (emitted || !retryable) break;
+      console.error(
+        `provider ${candidate.provider} failed before first token, trying next:`,
+        (err as Error).message,
+      );
+    }
+  }
+
+  throw new AppError(
+    "provider_error",
+    last instanceof Error ? last.message : "All AI providers failed.",
+  );
+}
+
 /** Tier-ordered candidates: the tier's primary first, then the shared fallback. */
 export function candidatesForTier(config: AppConfig, tier: Tier): Candidate[] {
   const primary: Candidate = tier === "premium"
     ? {
       provider: "anthropic",
       generate: anthropicGenerateJson,
+      stream: anthropicStreamText,
       apiKey: Deno.env.get("ANTHROPIC_API_KEY") ?? "",
       model: premiumModelId(config.str("ai_model_premium", "claude-sonnet")),
     }
     : {
       provider: "gemini",
       generate: geminiGenerateJson,
+      stream: geminiStreamText,
       apiKey: Deno.env.get("GEMINI_API_KEY") ?? "",
       model: config.str("ai_model_free", "gemini-3.1-flash-lite"),
     };
@@ -170,6 +245,7 @@ export function candidatesForTier(config: AppConfig, tier: Tier): Candidate[] {
   const ladder: Candidate[] = [primary, {
     provider: "openai",
     generate: openaiGenerateJson,
+    stream: openaiStreamText,
     apiKey: Deno.env.get("OPENAI_API_KEY") ?? "",
     model: config.str("ai_model_fallback", "gpt-4o-mini"),
   }];
@@ -180,6 +256,7 @@ export function candidatesForTier(config: AppConfig, tier: Tier): Candidate[] {
     ladder.push({
       provider: "selfhost",
       generate: selfhostGenerateJson,
+      stream: selfhostStreamText,
       apiKey: Deno.env.get("AI_SELFHOST_API_KEY") || "not-needed",
       model: config.str("ai_model_selfhost", "local"),
     });
@@ -196,6 +273,20 @@ export function generateJson(
   opts: AttemptOptions = {},
 ): Promise<RoutedResult> {
   return runLadder(candidatesForTier(config, tier), system, user, {
+    timeoutMs: config.int("ai_provider_timeout_ms", DEFAULT_TIMEOUT_MS),
+    ...opts,
+  });
+}
+
+/** Streaming counterpart of `generateJson`: same tier ladder, same timeouts. */
+export function streamText(
+  config: AppConfig,
+  tier: Tier,
+  system: string,
+  user: string,
+  opts: AttemptOptions = {},
+): AsyncGenerator<string, StreamOutcome> {
+  return streamLadder(candidatesForTier(config, tier), system, user, {
     timeoutMs: config.int("ai_provider_timeout_ms", DEFAULT_TIMEOUT_MS),
     ...opts,
   });

@@ -2,7 +2,8 @@
 // Optional; only registered in route.ts when the env var is set.
 
 import { postJson } from "./http.ts";
-import { GenerateArgs, GenerationResult } from "./types.ts";
+import { openAiCompatibleStream } from "./openai.ts";
+import { GenerateArgs, GenerationResult, StreamChunk } from "./types.ts";
 
 const DEFAULT_TEMPERATURE = 0.2;
 const DEFAULT_MAX_TOKENS = 2048;
@@ -15,9 +16,21 @@ export function selfhostConfigured(): boolean {
   return baseUrl().length > 0;
 }
 
+function key(args: GenerateArgs): string {
+  return args.apiKey || Deno.env.get("AI_SELFHOST_API_KEY") || "not-needed";
+}
+
+/** Our own model, streaming the same dialect it already serves for buffered calls. */
+export function selfhostStreamText(args: GenerateArgs): AsyncIterable<StreamChunk> {
+  return openAiCompatibleStream("selfhost", `${baseUrl()}/v1/chat/completions`, {
+    ...args,
+    apiKey: key(args),
+  });
+}
+
 export async function selfhostGenerateJson(args: GenerateArgs): Promise<GenerationResult> {
   const root = baseUrl();
-  const apiKey = args.apiKey || Deno.env.get("AI_SELFHOST_API_KEY") || "not-needed";
+  const apiKey = key(args);
 
   const json = await postJson({
     provider: "selfhost",

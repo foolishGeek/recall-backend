@@ -126,23 +126,54 @@ async function settle(
   if (error) console.error("ai_gate_settle failed:", error.message);
 }
 
-async function run<T>(
-  input: MeterInput,
-  work: (r: Reservation) => Promise<MeteredOutcome<T>>,
-  decision: GateDecision,
-): Promise<T> {
-  const requestId = decision.request_id ?? null;
-  const reservation: Reservation = {
-    requestId,
-    tier: decision.tier ?? "free",
-    temperature: decision.temperature,
-    maxTokens: decision.max_tokens,
-  };
+/**
+ * A held unit of quota, closed by exactly one of `succeeded` / `failed`.
+ *
+ * Streaming needs the reservation and the response to be separable: the quota
+ * decision has to happen before the first byte (a denial must be a JSON 403, not
+ * an error buried in an event stream), while the cost is only known once the
+ * stream ends. `withMeteredRequest` is this same object with the try/catch
+ * written for it.
+ */
+export interface MeteredHold {
+  reservation: Reservation;
+  /** Set when the client's idempotency key matched a cached response. */
+  replay?: unknown;
+  succeeded(out: Omit<MeteredOutcome<unknown>, "result"> & { result?: unknown }): Promise<void>;
+  failed(err: unknown): Promise<void>;
+}
 
+/**
+ * Reserves a unit and returns the hold. Denials raise the mapped AppError, so
+ * callers can treat a returned hold as permission to spend.
+ */
+export async function openMeteredRequest(input: MeterInput): Promise<MeteredHold> {
+  const decision = await reserve(input);
+  if (decision.replay) {
+    return {
+      replay: decision.response,
+      reservation: { requestId: null, tier: decision.tier ?? "free" },
+      succeeded: () => Promise.resolve(),
+      failed: () => Promise.resolve(),
+    };
+  }
+  assertAllowed(decision);
+
+  const requestId = decision.request_id ?? null;
   const startedAt = Date.now();
-  try {
-    const out = await work(reservation);
-    if (requestId) {
+  let closed = false;
+
+  return {
+    reservation: {
+      requestId,
+      tier: decision.tier ?? "free",
+      temperature: decision.temperature,
+      maxTokens: decision.max_tokens,
+    },
+    async succeeded(out) {
+      if (closed) return;
+      closed = true;
+      if (!requestId) return;
       await settle(requestId, "succeeded", {
         model: out.model,
         provider: out.provider,
@@ -151,25 +182,37 @@ async function run<T>(
         latencyMs: Date.now() - startedAt,
         response: out.cacheResponse ? out.result : null,
       });
-    }
+    },
+    async failed(err) {
+      if (closed) return;
+      closed = true;
+      const errorCode = err instanceof AppError ? err.code : "provider_error";
+      if (requestId) {
+        await settle(requestId, "failed", { latencyMs: Date.now() - startedAt, errorCode });
+      }
+      // Capture failed generations so rejected answers still enter the spine.
+      await logFailedInteraction({
+        userId: input.userId,
+        feature: input.feature,
+        requestId,
+        conversationId: input.conversationId ?? null,
+        errorCode,
+        latencyMs: Date.now() - startedAt,
+      });
+    },
+  };
+}
+
+async function run<T>(
+  hold: MeteredHold,
+  work: (r: Reservation) => Promise<MeteredOutcome<T>>,
+): Promise<T> {
+  try {
+    const out = await work(hold.reservation);
+    await hold.succeeded(out);
     return out.result;
   } catch (err) {
-    const errorCode = err instanceof AppError ? err.code : "provider_error";
-    if (requestId) {
-      await settle(requestId, "failed", {
-        latencyMs: Date.now() - startedAt,
-        errorCode,
-      });
-    }
-    // Capture failed generations so rejected answers still enter the spine.
-    await logFailedInteraction({
-      userId: input.userId,
-      feature: input.feature,
-      requestId,
-      conversationId: input.conversationId ?? null,
-      errorCode,
-      latencyMs: Date.now() - startedAt,
-    });
+    await hold.failed(err);
     throw err;
   }
 }
@@ -182,10 +225,9 @@ export async function withMeteredRequest<T>(
   input: MeterInput,
   work: (r: Reservation) => Promise<MeteredOutcome<T>>,
 ): Promise<T> {
-  const decision = await reserve(input);
-  if (decision.replay) return decision.response as T;
-  assertAllowed(decision);
-  return run(input, work, decision);
+  const hold = await openMeteredRequest(input);
+  if (hold.replay !== undefined) return hold.replay as T;
+  return run(hold, work);
 }
 
 /**
@@ -197,8 +239,14 @@ export async function withOptionalMeteredRequest<T>(
   input: MeterInput,
   work: (r: Reservation) => Promise<MeteredOutcome<T>>,
 ): Promise<T | null> {
-  const decision = await reserve(input);
-  if (decision.replay) return decision.response as T;
-  if (!decision.allowed) return null;
-  return run(input, work, decision);
+  let hold: MeteredHold;
+  try {
+    hold = await openMeteredRequest(input);
+  } catch (err) {
+    // A denial is the expected quiet outcome here; anything else is a real fault.
+    if (err instanceof AppError) return null;
+    throw err;
+  }
+  if (hold.replay !== undefined) return hold.replay as T;
+  return run(hold, work);
 }
