@@ -219,6 +219,10 @@ async function corpusFallback(
   let q = db
     .from("nodes")
     .select("id, title, extracted_text, markdown, url, link_preview_json, bucket_id, updated_at")
+    // This client is service-role and bypasses RLS, so ownership is not implied
+    // by anything above. Without it, one bad id in the scope would read another
+    // user's notes into the prompt.
+    .eq("user_id", req.userId)
     .is("deleted_at", null)
     .order("updated_at", { ascending: false })
     .limit(Math.max(maxNodes * 3, maxNodes));

@@ -6,6 +6,7 @@
 
 import { adminClient } from "../../_shared/supabase.ts";
 import { AppConfig } from "../../_shared/config.ts";
+import { AppError } from "../../_shared/errors.ts";
 import { generateJson, Tier } from "../../_shared/providers/route.ts";
 import { withMeteredRequest } from "../../_shared/quota.ts";
 import { asUuidArray, requireUuid } from "../../_shared/validate.ts";
@@ -144,12 +145,18 @@ async function loadScopeMeta(
       .eq("user_id", userId)
       .is("deleted_at", null)
       .maybeSingle();
-    const name = (bucket as { name?: string } | null)?.name ?? "this bucket";
+    // A bucket id that is not this user's must not be described back to them,
+    // and must not have its note titles read. This client is service-role, so
+    // ownership is only enforced where we say it is. Reported as bad input
+    // rather than "not found", which would confirm the bucket exists.
+    if (!bucket) throw new AppError("invalid_input", "Unknown bucket.");
+    const name = (bucket as { name?: string }).name ?? "this bucket";
 
     const { data: nodes } = await db
       .from("nodes")
       .select("id, title")
       .eq("bucket_id", scopeId)
+      .eq("user_id", userId)
       .is("deleted_at", null)
       .order("updated_at", { ascending: false })
       .limit(15);
@@ -177,7 +184,14 @@ async function loadScopeMeta(
     return { label: name, titles, tags };
   }
 
-  const { data: active } = await db.rpc("active_buckets_for_user", { p_user: userId });
+  // The argument is `uid`. Calling it `p_user` made this RPC fail on every
+  // request, and because the error was dropped the whole account-wide scope
+  // silently resolved to "no buckets, no titles" — which is why every user saw
+  // the same three generic starter questions.
+  const { data: active, error: activeErr } = await db.rpc("active_buckets_for_user", {
+    uid: userId,
+  });
+  if (activeErr) throw activeErr;
   const buckets = (active ?? []) as { id: string; name?: string }[];
   const ids = buckets.map((b) => b.id);
   const label = buckets.map((b) => b.name).filter(Boolean).slice(0, 3).join(", ") ||
@@ -189,6 +203,7 @@ async function loadScopeMeta(
       .from("nodes")
       .select("title")
       .in("bucket_id", ids)
+      .eq("user_id", userId)
       .is("deleted_at", null)
       .order("updated_at", { ascending: false })
       .limit(15);
